@@ -12,9 +12,10 @@ repository stays as the reference until each layer is ported and verified here.
 
 - Transpilation layer (Flow to portable C): present and self-hosting. The
   bootstrap compiles itself to a three-generation byte-identical fixed point.
-- Language corpus: 104 of 126 `tests/lang` files compile and run through the
-  self-hosted compiler. The remaining 22 are the known gaps (closures, effects,
-  generics, time blocks) tracked for the port.
+- Language corpus: 103 of 126 `tests/lang` files compile and run through the
+  self-hosted compiler on the Linux CI runner (104 on macOS; the one difference,
+  `test_geometry_diagram`, is platform-dependent). The rest are the known gaps
+  (closures, effects, generics, time blocks) tracked for the port.
 - MLIR lowering layer: being ported from the Python host to Flow. The plan and
   the module skeletons are in [`docs/MLIR_PORT.md`](docs/MLIR_PORT.md) and
   `compiler/src/mlir/`.

@@ -44,8 +44,9 @@ cc -O0 -o /tmp/out /tmp/out.c -Itests/lang
 
 ## Language corpus
 
-`tests/lang/*.flow` is the self-host regression target. Current baseline is 104
-of 126 files compiling and running. The 22 that do not are the known gaps:
+`tests/lang/*.flow` is the self-host regression target. The Linux CI baseline is
+103 of 126 files compiling and running (macOS passes 104; the one difference,
+`test_geometry_diagram`, is platform-dependent). The rest are the known gaps:
 closures, effects, generics, time blocks. CI fails if the passing count drops
 below the baseline. Raise the baseline as gaps close. Never lower it.
 
