@@ -20,7 +20,7 @@ import .ast {
     AstArena, AST_NONE,
     AST_PROGRAM, AST_FN, AST_PARAM, AST_TYPE, AST_BLOCK, AST_RETURN,
     AST_BINOP, AST_UNARY, AST_IDENT, AST_INT, AST_BOOL, AST_EXPORT,
-    AST_LET, AST_ASSIGN, AST_EXPR_STMT
+    AST_LET, AST_ASSIGN, AST_EXPR_STMT, AST_CALL, AST_FLOAT
 }
 
 extern {
@@ -46,7 +46,8 @@ export struct MlirScope {
     ne: ptr<i32>,
     refs: ptr<i32>,
     n: i32,
-    cap: i32
+    cap: i32,
+    prog_root: i32
 }
 
 function flowc_mlir_buf_init(out: ptr<u8>, cap: i32) -> MlirBuf {
@@ -269,6 +270,59 @@ function flowc_mlir_is_arith(op: i32) -> i32 {
     return 0
 }
 
+# Find a top-level function by name span. Returns its AST_FN id, or AST_NONE.
+function flowc_mlir_lookup_fn(arena: AstArena, src: ptr<u8>, root: i32, ns: i32, ne: i32) -> i32 {
+    if root == AST_NONE {
+        return AST_NONE
+    }
+    let mut item: i32 = arena.nodes[root].a
+    while item != AST_NONE {
+        let mut fn: i32 = item
+        if arena.nodes[item].kind == AST_EXPORT {
+            fn = arena.nodes[item].a
+        }
+        if fn != AST_NONE {
+            if arena.nodes[fn].kind == AST_FN {
+                if flowc_mlir_span_span_eq(src, arena.nodes[fn].name_start, arena.nodes[fn].name_end, ns, ne) == 1 {
+                    return fn
+                }
+            }
+        }
+        item = arena.nodes[item].next
+    }
+    return AST_NONE
+}
+
+# 1 when the function returns i32 and every parameter is i32. A void return or
+# any non-i32 parameter fails, since this slice only lowers i32 calls.
+function flowc_mlir_fn_all_i32(arena: AstArena, src: ptr<u8>, fn_id: i32) -> i32 {
+    if arena.nodes[fn_id].b == AST_NONE {
+        return 0
+    }
+    if flowc_mlir_type_is_i32(arena, src, arena.nodes[fn_id].b) == 0 {
+        return 0
+    }
+    let mut p: i32 = arena.nodes[fn_id].a
+    while p != AST_NONE {
+        if flowc_mlir_type_is_i32(arena, src, arena.nodes[p].a) == 0 {
+            return 0
+        }
+        p = arena.nodes[p].next
+    }
+    return 1
+}
+
+# Count of parameters (or call arguments) in a `.a` chain linked by `.next`.
+function flowc_mlir_chain_len(arena: AstArena, head: i32) -> i32 {
+    let mut n: i32 = 0
+    let mut x: i32 = head
+    while x != AST_NONE {
+        n = n + 1
+        x = arena.nodes[x].next
+    }
+    return n
+}
+
 # 1 when the expression is in the supported i32 subset (no comparisons).
 function flowc_mlir_expr_supported(arena: AstArena, src: ptr<u8>, id: i32, fn_id: i32, scope: ptr<MlirScope>) -> i32 {
     if id == AST_NONE {
@@ -302,6 +356,34 @@ function flowc_mlir_expr_supported(arena: AstArena, src: ptr<u8>, id: i32, fn_id
             return 0
         }
         return 0
+    }
+    if kind == AST_CALL {
+        let callee: i32 = flowc_mlir_lookup_fn(arena, src, scope[0].prog_root, arena.nodes[id].name_start, arena.nodes[id].name_end)
+        if callee == AST_NONE {
+            return 0
+        }
+        # The callee must be emitted (has a body, not generic) so the symbol and
+        # its signature exist in the module.
+        if arena.nodes[callee].c == AST_NONE {
+            return 0
+        }
+        if arena.nodes[callee].ival != 0 {
+            return 0
+        }
+        if flowc_mlir_fn_all_i32(arena, src, callee) == 0 {
+            return 0
+        }
+        if flowc_mlir_chain_len(arena, arena.nodes[id].a) != flowc_mlir_chain_len(arena, arena.nodes[callee].a) {
+            return 0
+        }
+        let mut arg: i32 = arena.nodes[id].a
+        while arg != AST_NONE {
+            if flowc_mlir_expr_supported(arena, src, arg, fn_id, scope) == 0 {
+                return 0
+            }
+            arg = arena.nodes[arg].next
+        }
+        return 1
     }
     return 0
 }
@@ -434,6 +516,49 @@ function flowc_mlir_emit_expr(w: ptr<MlirBuf>, arena: AstArena, src: ptr<u8>, id
         flowc_mlir_puts(w, ", ")
         flowc_mlir_put_ref(w, r)
         flowc_mlir_puts(w, " : i32\n")
+        return n
+    }
+    if kind == AST_CALL {
+        let mut refs: array<i32, 16> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        let mut na: i32 = 0
+        let mut arg: i32 = arena.nodes[id].a
+        while arg != AST_NONE {
+            if na >= 16 {
+                return 0 - 1
+            }
+            let r: i32 = flowc_mlir_emit_expr(w, arena, src, arg, fn_id, scope)
+            if r == 0 - 1 {
+                return 0 - 1
+            }
+            refs[na] = r
+            na = na + 1
+            arg = arena.nodes[arg].next
+        }
+        let n: i32 = w[0].nval
+        w[0].nval = n + 1
+        flowc_mlir_puts(w, "    %v")
+        flowc_mlir_put_i32(w, n)
+        flowc_mlir_puts(w, " = func.call @")
+        flowc_mlir_put_span(w, src, arena.nodes[id].name_start, arena.nodes[id].name_end)
+        flowc_mlir_putc(w, 40)
+        let mut i: i32 = 0
+        while i < na {
+            if i != 0 {
+                flowc_mlir_puts(w, ", ")
+            }
+            flowc_mlir_put_ref(w, refs[i])
+            i = i + 1
+        }
+        flowc_mlir_puts(w, ") : (")
+        i = 0
+        while i < na {
+            if i != 0 {
+                flowc_mlir_puts(w, ", ")
+            }
+            flowc_mlir_puts(w, "i32")
+            i = i + 1
+        }
+        flowc_mlir_puts(w, ") -> i32\n")
         return n
     }
     return 0 - 1
@@ -909,7 +1034,8 @@ export function flowc_mlir_gen_emit(arena: AstArena, root: i32, src: ptr<u8>, ou
         ne: malloc((cap as i64) * 4),
         refs: malloc((cap as i64) * 4),
         n: 0,
-        cap: cap
+        cap: cap,
+        prog_root: root
     }
 
     flowc_mlir_puts(&w, "// Generated by flowc Stage-A MLIR backend\n")

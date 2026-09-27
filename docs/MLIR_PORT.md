@@ -33,8 +33,12 @@ Pure-float functions (all parameters and the return one of `f64`/`f32`) whose
 body is a single return also lower faithfully, to `arith.addf`/`subf`/`mulf`/
 `divf`/`negf` with float constants. Mixed int and float signatures still stub.
 
-Still to do: multi-statement floats, calls, and control flow (`scf`/`cf`), then
-the canonicalize, optimizer, backend, and JIT phases below.
+Integer function calls lower to `func.call` when the callee is a defined,
+non-generic i32 function (all i32 parameters, i32 return), so integer helpers
+compose across the module.
+
+Still to do: multi-statement floats, float and mixed calls, and control flow
+(`scf`/`cf`), then the canonicalize, optimizer, backend, and JIT phases below.
 
 ## Source-to-target map
 
