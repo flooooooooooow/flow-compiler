@@ -9231,6 +9231,486 @@ int32_t flowc_jsgen_emit(AstArena arena, int32_t root, uint8_t* src, uint8_t* ou
 }
 
 
+typedef struct MlirBuf {
+  uint8_t* out;
+  int32_t cap;
+  int32_t len;
+  int32_t err;
+  int32_t nval;
+} MlirBuf;
+
+MlirBuf flowc_mlir_buf_init(uint8_t* out, int32_t cap);
+void flowc_mlir_putc(MlirBuf* w, int32_t c);
+void flowc_mlir_puts(MlirBuf* w, const char* s);
+void flowc_mlir_put_i32(MlirBuf* w, int32_t val);
+void flowc_mlir_put_span(MlirBuf* w, uint8_t* src, int32_t start, int32_t end);
+void flowc_mlir_put_ref(MlirBuf* w, int32_t code);
+int32_t flowc_mlir_span_eq(uint8_t* src, int32_t start, int32_t end, const char* lit);
+void flowc_mlir_put_type(MlirBuf* w, AstArena arena, uint8_t* src, int32_t ty);
+int32_t flowc_mlir_ret_is_void(int32_t ty);
+int32_t flowc_mlir_param_index(AstArena arena, uint8_t* src, int32_t fn_id, int32_t ns, int32_t ne);
+int32_t flowc_mlir_is_cmp(int32_t op);
+int32_t flowc_mlir_expr_supported(AstArena arena, uint8_t* src, int32_t id, int32_t fn_id);
+void flowc_mlir_put_int_op(MlirBuf* w, int32_t op);
+void flowc_mlir_put_cmp_pred(MlirBuf* w, int32_t op);
+int32_t flowc_mlir_emit_expr(MlirBuf* w, AstArena arena, uint8_t* src, int32_t id, int32_t fn_id);
+int32_t flowc_mlir_emit_zero(MlirBuf* w, AstArena arena, uint8_t* src, int32_t ty);
+int32_t flowc_mlir_body_is_simple_return(AstArena arena, uint8_t* src, int32_t body, int32_t fn_id);
+void flowc_mlir_emit_fn(MlirBuf* w, AstArena arena, uint8_t* src, int32_t fn_id);
+int32_t flowc_mlir_unwrap_fn(AstArena arena, int32_t item);
+int32_t flowc_mlir_gen_emit(AstArena arena, int32_t root, uint8_t* src, uint8_t* out, int32_t out_cap);
+MlirBuf flowc_mlir_buf_init(uint8_t* out, int32_t cap) {
+  return (MlirBuf){ .out = out, .cap = cap, .len = 0, .err = 0, .nval = 0 };
+}
+
+void flowc_mlir_putc(MlirBuf* w, int32_t c) {
+  if ((w[0]).err != 0) {
+  return;
+}
+  if ((w[0]).len >= (w[0]).cap) {
+  (w[0]).err = 1;
+  return;
+}
+  (w[0]).out[(w[0]).len] = c;
+  (w[0]).len = ((w[0]).len + 1);
+}
+
+void flowc_mlir_puts(MlirBuf* w, const char* s) {
+  uint8_t* p = (uint8_t*)(s);
+  int32_t n = (int32_t)(strlen(s));
+  int32_t i = 0;
+  while (i < n) {
+  flowc_mlir_putc(w, p[i]);
+  i = (i + 1);
+}
+}
+
+void flowc_mlir_put_i32(MlirBuf* w, int32_t val) {
+  int32_t v = val;
+  if (v < 0) {
+  flowc_mlir_putc(w, 45);
+  v = (0 - v);
+}
+  if (v == 0) {
+  flowc_mlir_putc(w, 48);
+  return;
+}
+  uint8_t digits[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+  int32_t n = 0;
+  while (v > 0) {
+  digits[n] = ((v % 10) + 48);
+  v = (v / 10);
+  n = (n + 1);
+}
+  int32_t i = n;
+  while (i > 0) {
+  i = (i - 1);
+  flowc_mlir_putc(w, digits[i]);
+}
+}
+
+void flowc_mlir_put_span(MlirBuf* w, uint8_t* src, int32_t start, int32_t end) {
+  int32_t i = start;
+  while (i < end) {
+  flowc_mlir_putc(w, src[i]);
+  i = (i + 1);
+}
+}
+
+void flowc_mlir_put_ref(MlirBuf* w, int32_t code) {
+  if (code >= 0) {
+  flowc_mlir_puts(w, "%v");
+  flowc_mlir_put_i32(w, code);
+  return;
+}
+  flowc_mlir_puts(w, "%arg");
+  flowc_mlir_put_i32(w, ((0 - code) - 2));
+}
+
+int32_t flowc_mlir_span_eq(uint8_t* src, int32_t start, int32_t end, const char* lit) {
+  uint8_t* p = (uint8_t*)(lit);
+  int32_t n = (int32_t)(strlen(lit));
+  if ((end - start) != n) {
+  return 0;
+}
+  int32_t i = 0;
+  while (i < n) {
+  if (src[(start + i)] != p[i]) {
+  return 0;
+}
+  i = (i + 1);
+}
+  return 1;
+}
+
+void flowc_mlir_put_type(MlirBuf* w, AstArena arena, uint8_t* src, int32_t ty) {
+  if (ty == AST_NONE) {
+  flowc_mlir_puts(w, "i32");
+  return;
+}
+  int32_t s = ((arena).nodes[ty]).name_start;
+  int32_t e = ((arena).nodes[ty]).name_end;
+  if (flowc_mlir_span_eq(src, s, e, "i64") == 1) {
+  flowc_mlir_puts(w, "i64");
+  return;
+}
+  if (flowc_mlir_span_eq(src, s, e, "f64") == 1) {
+  flowc_mlir_puts(w, "f64");
+  return;
+}
+  if (flowc_mlir_span_eq(src, s, e, "f32") == 1) {
+  flowc_mlir_puts(w, "f32");
+  return;
+}
+  if (flowc_mlir_span_eq(src, s, e, "bool") == 1) {
+  flowc_mlir_puts(w, "i1");
+  return;
+}
+  flowc_mlir_puts(w, "i32");
+}
+
+int32_t flowc_mlir_ret_is_void(int32_t ty) {
+  if (ty == AST_NONE) {
+  return 1;
+}
+  return 0;
+}
+
+int32_t flowc_mlir_param_index(AstArena arena, uint8_t* src, int32_t fn_id, int32_t ns, int32_t ne) {
+  int32_t p = ((arena).nodes[fn_id]).a;
+  int32_t idx = 0;
+  while (p != AST_NONE) {
+  int32_t ps = ((arena).nodes[p]).name_start;
+  int32_t pe = ((arena).nodes[p]).name_end;
+  if ((pe - ps) == (ne - ns)) {
+  int32_t k = 0;
+  int32_t same = 1;
+  while (k < (ne - ns)) {
+  if (src[(ps + k)] != src[(ns + k)]) {
+  same = 0;
+  k = (ne - ns);
+} else {
+  k = (k + 1);
+}
+}
+  if (same == 1) {
+  return idx;
+}
+}
+  idx = (idx + 1);
+  p = ((arena).nodes[p]).next;
+}
+  return (0 - 1);
+}
+
+int32_t flowc_mlir_is_cmp(int32_t op) {
+  if (op == TOK_EQEQ || op == TOK_NE || op == TOK_LT || op == TOK_GT || op == TOK_LE || op == TOK_GE) {
+  return 1;
+}
+  return 0;
+}
+
+int32_t flowc_mlir_expr_supported(AstArena arena, uint8_t* src, int32_t id, int32_t fn_id) {
+  if (id == AST_NONE) {
+  return 0;
+}
+  int32_t kind = ((arena).nodes[id]).kind;
+  if (kind == AST_INT) {
+  return 1;
+}
+  if (kind == AST_BOOL) {
+  return 1;
+}
+  if (kind == AST_IDENT) {
+  if (flowc_mlir_param_index(arena, src, fn_id, ((arena).nodes[id]).name_start, ((arena).nodes[id]).name_end) >= 0) {
+  return 1;
+}
+  return 0;
+}
+  if (kind == AST_BINOP) {
+  int32_t op = ((arena).nodes[id]).ival;
+  int32_t arith = 0;
+  if (op == TOK_PLUS || op == TOK_MINUS || op == TOK_STAR || op == TOK_SLASH || op == TOK_PERCENT) {
+  if (flowc_mlir_expr_supported(arena, src, ((arena).nodes[id]).a, fn_id) == 1) {
+  return flowc_mlir_expr_supported(arena, src, ((arena).nodes[id]).b, fn_id);
+}
+  return 0;
+}
+  if (flowc_mlir_is_cmp(op) == 1) {
+  if (flowc_mlir_expr_supported(arena, src, ((arena).nodes[id]).a, fn_id) == 1) {
+  return flowc_mlir_expr_supported(arena, src, ((arena).nodes[id]).b, fn_id);
+}
+  return 0;
+}
+  return 0;
+}
+  return 0;
+}
+
+void flowc_mlir_put_int_op(MlirBuf* w, int32_t op) {
+  if (op == TOK_PLUS) {
+  flowc_mlir_puts(w, "arith.addi");
+  return;
+}
+  if (op == TOK_MINUS) {
+  flowc_mlir_puts(w, "arith.subi");
+  return;
+}
+  if (op == TOK_STAR) {
+  flowc_mlir_puts(w, "arith.muli");
+  return;
+}
+  if (op == TOK_SLASH) {
+  flowc_mlir_puts(w, "arith.divsi");
+  return;
+}
+  flowc_mlir_puts(w, "arith.remsi");
+}
+
+void flowc_mlir_put_cmp_pred(MlirBuf* w, int32_t op) {
+  if (op == TOK_EQEQ) {
+  flowc_mlir_puts(w, "eq");
+  return;
+}
+  if (op == TOK_NE) {
+  flowc_mlir_puts(w, "ne");
+  return;
+}
+  if (op == TOK_LT) {
+  flowc_mlir_puts(w, "slt");
+  return;
+}
+  if (op == TOK_GT) {
+  flowc_mlir_puts(w, "sgt");
+  return;
+}
+  if (op == TOK_LE) {
+  flowc_mlir_puts(w, "sle");
+  return;
+}
+  flowc_mlir_puts(w, "sge");
+}
+
+int32_t flowc_mlir_emit_expr(MlirBuf* w, AstArena arena, uint8_t* src, int32_t id, int32_t fn_id) {
+  if (id == AST_NONE || (w[0]).err != 0) {
+  return (0 - 1);
+}
+  int32_t kind = ((arena).nodes[id]).kind;
+  if (kind == AST_INT) {
+  int32_t n = (w[0]).nval;
+  (w[0]).nval = (n + 1);
+  flowc_mlir_puts(w, "    %v");
+  flowc_mlir_put_i32(w, n);
+  flowc_mlir_puts(w, " = arith.constant ");
+  flowc_mlir_put_i32(w, ((arena).nodes[id]).ival);
+  flowc_mlir_puts(w, " : i32\n");
+  return n;
+}
+  if (kind == AST_BOOL) {
+  int32_t n = (w[0]).nval;
+  (w[0]).nval = (n + 1);
+  flowc_mlir_puts(w, "    %v");
+  flowc_mlir_put_i32(w, n);
+  flowc_mlir_puts(w, " = arith.constant ");
+  flowc_mlir_put_i32(w, ((arena).nodes[id]).ival);
+  flowc_mlir_puts(w, " : i1\n");
+  return n;
+}
+  if (kind == AST_IDENT) {
+  int32_t pidx = flowc_mlir_param_index(arena, src, fn_id, ((arena).nodes[id]).name_start, ((arena).nodes[id]).name_end);
+  if (pidx >= 0) {
+  return ((0 - pidx) - 2);
+}
+  return (0 - 1);
+}
+  if (kind == AST_BINOP) {
+  int32_t op = ((arena).nodes[id]).ival;
+  int32_t l = flowc_mlir_emit_expr(w, arena, src, ((arena).nodes[id]).a, fn_id);
+  int32_t r = flowc_mlir_emit_expr(w, arena, src, ((arena).nodes[id]).b, fn_id);
+  if (l == (0 - 1) || r == (0 - 1)) {
+  return (0 - 1);
+}
+  int32_t n = (w[0]).nval;
+  (w[0]).nval = (n + 1);
+  flowc_mlir_puts(w, "    %v");
+  flowc_mlir_put_i32(w, n);
+  flowc_mlir_puts(w, " = ");
+  if (flowc_mlir_is_cmp(op) == 1) {
+  flowc_mlir_puts(w, "arith.cmpi ");
+  flowc_mlir_put_cmp_pred(w, op);
+  flowc_mlir_puts(w, ", ");
+  flowc_mlir_put_ref(w, l);
+  flowc_mlir_puts(w, ", ");
+  flowc_mlir_put_ref(w, r);
+  flowc_mlir_puts(w, " : i32\n");
+  return n;
+}
+  flowc_mlir_put_int_op(w, op);
+  flowc_mlir_puts(w, " ");
+  flowc_mlir_put_ref(w, l);
+  flowc_mlir_puts(w, ", ");
+  flowc_mlir_put_ref(w, r);
+  flowc_mlir_puts(w, " : i32\n");
+  return n;
+}
+  return (0 - 1);
+}
+
+int32_t flowc_mlir_emit_zero(MlirBuf* w, AstArena arena, uint8_t* src, int32_t ty) {
+  int32_t n = (w[0]).nval;
+  (w[0]).nval = (n + 1);
+  flowc_mlir_puts(w, "    %v");
+  flowc_mlir_put_i32(w, n);
+  flowc_mlir_puts(w, " = arith.constant ");
+  int32_t is_f = 0;
+  if (ty != AST_NONE) {
+  int32_t s = ((arena).nodes[ty]).name_start;
+  int32_t e = ((arena).nodes[ty]).name_end;
+  if (flowc_mlir_span_eq(src, s, e, "f64") == 1) {
+  is_f = 1;
+}
+  if (flowc_mlir_span_eq(src, s, e, "f32") == 1) {
+  is_f = 1;
+}
+}
+  if (is_f == 1) {
+  flowc_mlir_puts(w, "0.0 : ");
+} else {
+  flowc_mlir_puts(w, "0 : ");
+}
+  flowc_mlir_put_type(w, arena, src, ty);
+  flowc_mlir_puts(w, "\n");
+  return n;
+}
+
+int32_t flowc_mlir_body_is_simple_return(AstArena arena, uint8_t* src, int32_t body, int32_t fn_id) {
+  if (body == AST_NONE) {
+  return 0;
+}
+  int32_t first = ((arena).nodes[body]).a;
+  if (first == AST_NONE) {
+  return 0;
+}
+  if (((arena).nodes[first]).next != AST_NONE) {
+  return 0;
+}
+  if (((arena).nodes[first]).kind != AST_RETURN) {
+  return 0;
+}
+  int32_t expr = ((arena).nodes[first]).a;
+  if (expr == AST_NONE) {
+  return 0;
+}
+  int32_t rty = ((arena).nodes[fn_id]).b;
+  if (rty != AST_NONE) {
+  int32_t s = ((arena).nodes[rty]).name_start;
+  int32_t e = ((arena).nodes[rty]).name_end;
+  if (flowc_mlir_span_eq(src, s, e, "i32") == 0 && flowc_mlir_span_eq(src, s, e, "bool") == 0) {
+  return 0;
+}
+} else {
+  return 0;
+}
+  return flowc_mlir_expr_supported(arena, src, expr, fn_id);
+}
+
+void flowc_mlir_emit_fn(MlirBuf* w, AstArena arena, uint8_t* src, int32_t fn_id) {
+  if (((arena).nodes[fn_id]).c == AST_NONE) {
+  return;
+}
+  if (((arena).nodes[fn_id]).ival != 0) {
+  return;
+}
+  (w[0]).nval = 0;
+  flowc_mlir_puts(w, "  func.func @");
+  flowc_mlir_put_span(w, src, ((arena).nodes[fn_id]).name_start, ((arena).nodes[fn_id]).name_end);
+  flowc_mlir_putc(w, 40);
+  int32_t param = ((arena).nodes[fn_id]).a;
+  int32_t idx = 0;
+  while (param != AST_NONE) {
+  if (idx != 0) {
+  flowc_mlir_puts(w, ", ");
+}
+  flowc_mlir_puts(w, "%arg");
+  flowc_mlir_put_i32(w, idx);
+  flowc_mlir_puts(w, ": ");
+  flowc_mlir_put_type(w, arena, src, ((arena).nodes[param]).a);
+  idx = (idx + 1);
+  param = ((arena).nodes[param]).next;
+}
+  flowc_mlir_putc(w, 41);
+  int32_t rty = ((arena).nodes[fn_id]).b;
+  if (flowc_mlir_ret_is_void(rty) == 0) {
+  flowc_mlir_puts(w, " -> ");
+  flowc_mlir_put_type(w, arena, src, rty);
+}
+  flowc_mlir_puts(w, " {\n");
+  int32_t body = ((arena).nodes[fn_id]).c;
+  if (flowc_mlir_ret_is_void(rty) == 1) {
+  flowc_mlir_puts(w, "    return\n");
+} else {
+  if (flowc_mlir_body_is_simple_return(arena, src, body, fn_id) == 1) {
+  int32_t expr = ((arena).nodes[((arena).nodes[body]).a]).a;
+  int32_t code = flowc_mlir_emit_expr(w, arena, src, expr, fn_id);
+  flowc_mlir_puts(w, "    return ");
+  flowc_mlir_put_ref(w, code);
+  flowc_mlir_puts(w, " : ");
+  flowc_mlir_put_type(w, arena, src, rty);
+  flowc_mlir_puts(w, "\n");
+} else {
+  int32_t z = flowc_mlir_emit_zero(w, arena, src, rty);
+  flowc_mlir_puts(w, "    return %v");
+  flowc_mlir_put_i32(w, z);
+  flowc_mlir_puts(w, " : ");
+  flowc_mlir_put_type(w, arena, src, rty);
+  flowc_mlir_puts(w, "\n");
+}
+}
+  flowc_mlir_puts(w, "  }\n");
+}
+
+int32_t flowc_mlir_unwrap_fn(AstArena arena, int32_t item) {
+  if (item == AST_NONE) {
+  return AST_NONE;
+}
+  if (((arena).nodes[item]).kind == AST_FN) {
+  return item;
+}
+  if (((arena).nodes[item]).kind == AST_EXPORT) {
+  int32_t inner = ((arena).nodes[item]).a;
+  if (inner != AST_NONE && ((arena).nodes[inner]).kind == AST_FN) {
+  return inner;
+}
+}
+  return AST_NONE;
+}
+
+int32_t flowc_mlir_gen_emit(AstArena arena, int32_t root, uint8_t* src, uint8_t* out, int32_t out_cap) {
+  if (root == AST_NONE || root < 0) {
+  return (0 - 1);
+}
+  if (((arena).nodes[root]).kind != AST_PROGRAM) {
+  return (0 - 1);
+}
+  MlirBuf w = flowc_mlir_buf_init(out, out_cap);
+  flowc_mlir_puts((&w), "// Generated by flowc Stage-A MLIR backend\n");
+  flowc_mlir_puts((&w), "module {\n");
+  int32_t item = ((arena).nodes[root]).a;
+  while (item != AST_NONE) {
+  int32_t fn = flowc_mlir_unwrap_fn(arena, item);
+  if (fn != AST_NONE) {
+  flowc_mlir_emit_fn((&w), arena, src, fn);
+}
+  item = ((arena).nodes[item]).next;
+}
+  flowc_mlir_puts((&w), "}\n");
+  if ((w).err != 0) {
+  return (0 - 1);
+}
+  return (w).len;
+}
+
+
 typedef struct FmtBuf {
   uint8_t* out;
   int32_t cap;
@@ -13307,6 +13787,16 @@ int32_t flowc_emit_mode() {
   return 1;
 }
 }
+  if (flowc_env_eq("FLOWC_BACKEND", "mlir") == 1) {
+  nout = flowc_mlir_gen_emit((p).arena, root, src, out, out_cap);
+  if (nout <= 0) {
+  puts("flowc emit: mlir_gen failed");
+  free(out);
+  flowc_parser_free(p);
+  free(src);
+  return 1;
+}
+} else {
   if (flowc_env_eq("FLOWC_BACKEND", "js") == 1) {
   nout = flowc_jsgen_emit((p).arena, root, src, out, out_cap);
   if (nout <= 0) {
@@ -13334,6 +13824,7 @@ int32_t flowc_emit_mode() {
   flowc_parser_free(p);
   free(src);
   return 1;
+}
 }
 }
 }
