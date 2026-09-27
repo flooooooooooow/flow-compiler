@@ -16,11 +16,12 @@ repository stays as the reference until each layer is ported and verified here.
   self-hosted compiler on the Linux CI runner (104 on macOS; the one difference,
   `test_geometry_diagram`, is platform-dependent). The rest are the known gaps
   (closures, effects, generics, time blocks) tracked for the port.
-- MLIR lowering layer: the first slice is in Flow. `compiler/src/mlir_gen.flow`
-  emits the `func` and `arith` dialects under `FLOWC_BACKEND=mlir`, faithfully
-  for integer and bool functions and as a valid typed stub otherwise. `mlir-opt`
-  verifies the output. Local bindings, calls, control flow, and floats are next.
-  The full plan is in [`docs/MLIR_PORT.md`](docs/MLIR_PORT.md).
+- MLIR lowering layer: in Flow and growing. `compiler/src/mlir_gen.flow` emits
+  the `func` and `arith` dialects under `FLOWC_BACKEND=mlir`, faithfully for
+  straight-line integer and bool functions (parameters, local bindings,
+  assignments, arithmetic, comparisons, unary minus) and as a valid typed stub
+  otherwise. `mlir-opt` verifies the output. Floats, calls, and control flow are
+  next. The full plan is in [`docs/MLIR_PORT.md`](docs/MLIR_PORT.md).
 
 ## Build
 

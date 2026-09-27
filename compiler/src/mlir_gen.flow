@@ -4,12 +4,13 @@
 #         that the Python host still carries in full. See docs/MLIR_PORT.md.
 #
 # Coverage in this slice: one func.func per Flow function, with typed block
-# arguments and a typed return. A function whose body is a single return of a
-# supported expression (integer and bool literals, parameters, integer
-# arithmetic, and integer comparisons) is lowered faithfully. Every other
-# function is emitted as a typed stub that returns a zero constant, so the
-# output is always MLIR the tools accept. Calls, control flow, floats, and
-# local bindings are the next phases in docs/MLIR_PORT.md.
+# arguments and a typed return. A function whose body is straight-line integer
+# and bool work (parameters, i32 local `let` bindings, assignments, integer
+# arithmetic, integer comparisons, unary minus, and a trailing return) lowers
+# faithfully to the func and arith dialects. Anything else (floats, calls,
+# control flow, other types) makes the whole function a valid typed zero-return
+# stub, so the module is always MLIR the tools accept. Floats, calls, and
+# control flow are the next phases in docs/MLIR_PORT.md.
 
 import .token {
     TOK_EQEQ, TOK_NE, TOK_LT, TOK_GT, TOK_LE, TOK_GE,
@@ -18,10 +19,13 @@ import .token {
 import .ast {
     AstArena, AST_NONE,
     AST_PROGRAM, AST_FN, AST_PARAM, AST_TYPE, AST_BLOCK, AST_RETURN,
-    AST_BINOP, AST_IDENT, AST_INT, AST_BOOL, AST_EXPORT
+    AST_BINOP, AST_UNARY, AST_IDENT, AST_INT, AST_BOOL, AST_EXPORT,
+    AST_LET, AST_ASSIGN, AST_EXPR_STMT
 }
 
 extern {
+    function malloc(size: i64) -> ptr<u8>
+    function free(p: ptr<u8>) -> void
     function strlen(s: string) -> i64
 }
 
@@ -32,6 +36,17 @@ export struct MlirBuf {
     len: i32,
     err: i32,
     nval: i32
+}
+
+# Straight-line local binding scope: name span -> current SSA reference code.
+# The reference is rebound in place on assignment, which is valid SSA because
+# this slice has no control-flow merges.
+export struct MlirScope {
+    ns: ptr<i32>,
+    ne: ptr<i32>,
+    refs: ptr<i32>,
+    n: i32,
+    cap: i32
 }
 
 function flowc_mlir_buf_init(out: ptr<u8>, cap: i32) -> MlirBuf {
@@ -121,6 +136,21 @@ function flowc_mlir_span_eq(src: ptr<u8>, start: i32, end: i32, lit: string) -> 
     return 1
 }
 
+# Compare two source spans for byte equality.
+function flowc_mlir_span_span_eq(src: ptr<u8>, sa: i32, ea: i32, sb: i32, eb: i32) -> i32 {
+    if ea - sa != eb - sb {
+        return 0
+    }
+    let mut i: i32 = 0
+    while i < ea - sa {
+        if src[sa + i] != src[sb + i] {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
 # Write the MLIR type for an AST_TYPE node (or i32 when absent/unknown).
 function flowc_mlir_put_type(w: ptr<MlirBuf>, arena: AstArena, src: ptr<u8>, ty: i32) {
     if ty == AST_NONE {
@@ -148,6 +178,19 @@ function flowc_mlir_put_type(w: ptr<MlirBuf>, arena: AstArena, src: ptr<u8>, ty:
     flowc_mlir_puts(w, "i32")
 }
 
+# 1 when the AST_TYPE names i32, or is absent (defaulted to i32).
+function flowc_mlir_type_is_i32(arena: AstArena, src: ptr<u8>, ty: i32) -> i32 {
+    if ty == AST_NONE {
+        return 1
+    }
+    let s: i32 = arena.nodes[ty].name_start
+    let e: i32 = arena.nodes[ty].name_end
+    if flowc_mlir_span_eq(src, s, e, "i32") == 1 {
+        return 1
+    }
+    return 0
+}
+
 # 1 when the return type is void (no `-> T`), else 0.
 function flowc_mlir_ret_is_void(ty: i32) -> i32 {
     if ty == AST_NONE {
@@ -156,32 +199,58 @@ function flowc_mlir_ret_is_void(ty: i32) -> i32 {
     return 0
 }
 
+# 1 when the return type is bool, else 0.
+function flowc_mlir_ret_is_bool(arena: AstArena, src: ptr<u8>, ty: i32) -> i32 {
+    if ty == AST_NONE {
+        return 0
+    }
+    let s: i32 = arena.nodes[ty].name_start
+    let e: i32 = arena.nodes[ty].name_end
+    return flowc_mlir_span_eq(src, s, e, "bool")
+}
+
 # Resolve an identifier span to a parameter index, or -1 if not a parameter.
 function flowc_mlir_param_index(arena: AstArena, src: ptr<u8>, fn_id: i32, ns: i32, ne: i32) -> i32 {
     let mut p: i32 = arena.nodes[fn_id].a
     let mut idx: i32 = 0
     while p != AST_NONE {
-        let ps: i32 = arena.nodes[p].name_start
-        let pe: i32 = arena.nodes[p].name_end
-        if pe - ps == ne - ns {
-            let mut k: i32 = 0
-            let mut same: i32 = 1
-            while k < ne - ns {
-                if src[ps + k] != src[ns + k] {
-                    same = 0
-                    k = ne - ns
-                } else {
-                    k = k + 1
-                }
-            }
-            if same == 1 {
-                return idx
-            }
+        if flowc_mlir_span_span_eq(src, arena.nodes[p].name_start, arena.nodes[p].name_end, ns, ne) == 1 {
+            return idx
         }
         idx = idx + 1
         p = arena.nodes[p].next
     }
     return 0 - 1
+}
+
+# Look up a local binding by name span. Returns the reference code, or -1.
+function flowc_mlir_scope_lookup(scope: ptr<MlirScope>, src: ptr<u8>, ns: i32, ne: i32) -> i32 {
+    let mut i: i32 = scope[0].n - 1
+    while i >= 0 {
+        if flowc_mlir_span_span_eq(src, scope[0].ns[i], scope[0].ne[i], ns, ne) == 1 {
+            return scope[0].refs[i]
+        }
+        i = i - 1
+    }
+    return 0 - 1
+}
+
+# Bind or rebind a name to a reference code.
+function flowc_mlir_scope_set(scope: ptr<MlirScope>, src: ptr<u8>, ns: i32, ne: i32, code: i32) {
+    let mut i: i32 = 0
+    while i < scope[0].n {
+        if flowc_mlir_span_span_eq(src, scope[0].ns[i], scope[0].ne[i], ns, ne) == 1 {
+            scope[0].refs[i] = code
+            return
+        }
+        i = i + 1
+    }
+    if scope[0].n < scope[0].cap {
+        scope[0].ns[scope[0].n] = ns
+        scope[0].ne[scope[0].n] = ne
+        scope[0].refs[scope[0].n] = code
+        scope[0].n = scope[0].n + 1
+    }
 }
 
 # 1 when a comparison operator, else 0.
@@ -192,8 +261,16 @@ function flowc_mlir_is_cmp(op: i32) -> i32 {
     return 0
 }
 
-# 1 when the expression is in the supported integer subset, else 0.
-function flowc_mlir_expr_supported(arena: AstArena, src: ptr<u8>, id: i32, fn_id: i32) -> i32 {
+# 1 when an integer arithmetic operator, else 0.
+function flowc_mlir_is_arith(op: i32) -> i32 {
+    if op == TOK_PLUS or op == TOK_MINUS or op == TOK_STAR or op == TOK_SLASH or op == TOK_PERCENT {
+        return 1
+    }
+    return 0
+}
+
+# 1 when the expression is in the supported i32 subset (no comparisons).
+function flowc_mlir_expr_supported(arena: AstArena, src: ptr<u8>, id: i32, fn_id: i32, scope: ptr<MlirScope>) -> i32 {
     if id == AST_NONE {
         return 0
     }
@@ -201,31 +278,47 @@ function flowc_mlir_expr_supported(arena: AstArena, src: ptr<u8>, id: i32, fn_id
     if kind == AST_INT {
         return 1
     }
-    if kind == AST_BOOL {
-        return 1
-    }
     if kind == AST_IDENT {
         if flowc_mlir_param_index(arena, src, fn_id, arena.nodes[id].name_start, arena.nodes[id].name_end) >= 0 {
             return 1
+        }
+        if flowc_mlir_scope_lookup(scope, src, arena.nodes[id].name_start, arena.nodes[id].name_end) >= 0 {
+            return 1
+        }
+        return 0
+    }
+    if kind == AST_UNARY {
+        if arena.nodes[id].ival == TOK_MINUS {
+            return flowc_mlir_expr_supported(arena, src, arena.nodes[id].a, fn_id, scope)
         }
         return 0
     }
     if kind == AST_BINOP {
         let op: i32 = arena.nodes[id].ival
-        let arith: i32 = 0
-        if op == TOK_PLUS or op == TOK_MINUS or op == TOK_STAR or op == TOK_SLASH or op == TOK_PERCENT {
-            if flowc_mlir_expr_supported(arena, src, arena.nodes[id].a, fn_id) == 1 {
-                return flowc_mlir_expr_supported(arena, src, arena.nodes[id].b, fn_id)
-            }
-            return 0
-        }
-        if flowc_mlir_is_cmp(op) == 1 {
-            if flowc_mlir_expr_supported(arena, src, arena.nodes[id].a, fn_id) == 1 {
-                return flowc_mlir_expr_supported(arena, src, arena.nodes[id].b, fn_id)
+        if flowc_mlir_is_arith(op) == 1 {
+            if flowc_mlir_expr_supported(arena, src, arena.nodes[id].a, fn_id, scope) == 1 {
+                return flowc_mlir_expr_supported(arena, src, arena.nodes[id].b, fn_id, scope)
             }
             return 0
         }
         return 0
+    }
+    return 0
+}
+
+# 1 when the expression is a supported bool comparison over supported i32 sides.
+function flowc_mlir_cmp_supported(arena: AstArena, src: ptr<u8>, id: i32, fn_id: i32, scope: ptr<MlirScope>) -> i32 {
+    if id == AST_NONE {
+        return 0
+    }
+    if arena.nodes[id].kind != AST_BINOP {
+        return 0
+    }
+    if flowc_mlir_is_cmp(arena.nodes[id].ival) == 0 {
+        return 0
+    }
+    if flowc_mlir_expr_supported(arena, src, arena.nodes[id].a, fn_id, scope) == 1 {
+        return flowc_mlir_expr_supported(arena, src, arena.nodes[id].b, fn_id, scope)
     }
     return 0
 }
@@ -276,43 +369,57 @@ function flowc_mlir_put_cmp_pred(w: ptr<MlirBuf>, op: i32) {
     flowc_mlir_puts(w, "sge")
 }
 
-# Emit an expression and return its value reference code (see put_ref).
-function flowc_mlir_emit_expr(w: ptr<MlirBuf>, arena: AstArena, src: ptr<u8>, id: i32, fn_id: i32) -> i32 {
+# Emit a fresh i32 constant temporary and return its number.
+function flowc_mlir_emit_const_i32(w: ptr<MlirBuf>, val: i32) -> i32 {
+    let n: i32 = w[0].nval
+    w[0].nval = n + 1
+    flowc_mlir_puts(w, "    %v")
+    flowc_mlir_put_i32(w, n)
+    flowc_mlir_puts(w, " = arith.constant ")
+    flowc_mlir_put_i32(w, val)
+    flowc_mlir_puts(w, " : i32\n")
+    return n
+}
+
+# Emit an i32 expression and return its value reference code (see put_ref).
+function flowc_mlir_emit_expr(w: ptr<MlirBuf>, arena: AstArena, src: ptr<u8>, id: i32, fn_id: i32, scope: ptr<MlirScope>) -> i32 {
     if id == AST_NONE or w[0].err != 0 {
         return 0 - 1
     }
     let kind: i32 = arena.nodes[id].kind
     if kind == AST_INT {
-        let n: i32 = w[0].nval
-        w[0].nval = n + 1
-        flowc_mlir_puts(w, "    %v")
-        flowc_mlir_put_i32(w, n)
-        flowc_mlir_puts(w, " = arith.constant ")
-        flowc_mlir_put_i32(w, arena.nodes[id].ival)
-        flowc_mlir_puts(w, " : i32\n")
-        return n
-    }
-    if kind == AST_BOOL {
-        let n: i32 = w[0].nval
-        w[0].nval = n + 1
-        flowc_mlir_puts(w, "    %v")
-        flowc_mlir_put_i32(w, n)
-        flowc_mlir_puts(w, " = arith.constant ")
-        flowc_mlir_put_i32(w, arena.nodes[id].ival)
-        flowc_mlir_puts(w, " : i1\n")
-        return n
+        return flowc_mlir_emit_const_i32(w, arena.nodes[id].ival)
     }
     if kind == AST_IDENT {
         let pidx: i32 = flowc_mlir_param_index(arena, src, fn_id, arena.nodes[id].name_start, arena.nodes[id].name_end)
         if pidx >= 0 {
             return (0 - pidx) - 2
         }
-        return 0 - 1
+        let lref: i32 = flowc_mlir_scope_lookup(scope, src, arena.nodes[id].name_start, arena.nodes[id].name_end)
+        return lref
+    }
+    if kind == AST_UNARY {
+        # Integer negation: 0 - operand.
+        let z: i32 = flowc_mlir_emit_const_i32(w, 0)
+        let v: i32 = flowc_mlir_emit_expr(w, arena, src, arena.nodes[id].a, fn_id, scope)
+        if v == 0 - 1 {
+            return 0 - 1
+        }
+        let n: i32 = w[0].nval
+        w[0].nval = n + 1
+        flowc_mlir_puts(w, "    %v")
+        flowc_mlir_put_i32(w, n)
+        flowc_mlir_puts(w, " = arith.subi %v")
+        flowc_mlir_put_i32(w, z)
+        flowc_mlir_puts(w, ", ")
+        flowc_mlir_put_ref(w, v)
+        flowc_mlir_puts(w, " : i32\n")
+        return n
     }
     if kind == AST_BINOP {
         let op: i32 = arena.nodes[id].ival
-        let l: i32 = flowc_mlir_emit_expr(w, arena, src, arena.nodes[id].a, fn_id)
-        let r: i32 = flowc_mlir_emit_expr(w, arena, src, arena.nodes[id].b, fn_id)
+        let l: i32 = flowc_mlir_emit_expr(w, arena, src, arena.nodes[id].a, fn_id, scope)
+        let r: i32 = flowc_mlir_emit_expr(w, arena, src, arena.nodes[id].b, fn_id, scope)
         if l == 0 - 1 or r == 0 - 1 {
             return 0 - 1
         }
@@ -321,16 +428,6 @@ function flowc_mlir_emit_expr(w: ptr<MlirBuf>, arena: AstArena, src: ptr<u8>, id
         flowc_mlir_puts(w, "    %v")
         flowc_mlir_put_i32(w, n)
         flowc_mlir_puts(w, " = ")
-        if flowc_mlir_is_cmp(op) == 1 {
-            flowc_mlir_puts(w, "arith.cmpi ")
-            flowc_mlir_put_cmp_pred(w, op)
-            flowc_mlir_puts(w, ", ")
-            flowc_mlir_put_ref(w, l)
-            flowc_mlir_puts(w, ", ")
-            flowc_mlir_put_ref(w, r)
-            flowc_mlir_puts(w, " : i32\n")
-            return n
-        }
         flowc_mlir_put_int_op(w, op)
         flowc_mlir_puts(w, " ")
         flowc_mlir_put_ref(w, l)
@@ -342,6 +439,28 @@ function flowc_mlir_emit_expr(w: ptr<MlirBuf>, arena: AstArena, src: ptr<u8>, id
     return 0 - 1
 }
 
+# Emit a bool comparison expression, returning the i1 value reference.
+function flowc_mlir_emit_cmp(w: ptr<MlirBuf>, arena: AstArena, src: ptr<u8>, id: i32, fn_id: i32, scope: ptr<MlirScope>) -> i32 {
+    let op: i32 = arena.nodes[id].ival
+    let l: i32 = flowc_mlir_emit_expr(w, arena, src, arena.nodes[id].a, fn_id, scope)
+    let r: i32 = flowc_mlir_emit_expr(w, arena, src, arena.nodes[id].b, fn_id, scope)
+    if l == 0 - 1 or r == 0 - 1 {
+        return 0 - 1
+    }
+    let n: i32 = w[0].nval
+    w[0].nval = n + 1
+    flowc_mlir_puts(w, "    %v")
+    flowc_mlir_put_i32(w, n)
+    flowc_mlir_puts(w, " = arith.cmpi ")
+    flowc_mlir_put_cmp_pred(w, op)
+    flowc_mlir_puts(w, ", ")
+    flowc_mlir_put_ref(w, l)
+    flowc_mlir_puts(w, ", ")
+    flowc_mlir_put_ref(w, r)
+    flowc_mlir_puts(w, " : i32\n")
+    return n
+}
+
 # Emit a typed zero constant and return its temporary number.
 function flowc_mlir_emit_zero(w: ptr<MlirBuf>, arena: AstArena, src: ptr<u8>, ty: i32) -> i32 {
     let n: i32 = w[0].nval
@@ -349,7 +468,7 @@ function flowc_mlir_emit_zero(w: ptr<MlirBuf>, arena: AstArena, src: ptr<u8>, ty
     flowc_mlir_puts(w, "    %v")
     flowc_mlir_put_i32(w, n)
     flowc_mlir_puts(w, " = arith.constant ")
-    let is_f: i32 = 0
+    let mut is_f: i32 = 0
     if ty != AST_NONE {
         let s: i32 = arena.nodes[ty].name_start
         let e: i32 = arena.nodes[ty].name_end
@@ -370,40 +489,135 @@ function flowc_mlir_emit_zero(w: ptr<MlirBuf>, arena: AstArena, src: ptr<u8>, ty
     return n
 }
 
-# 1 when the body is exactly one return of a supported expression.
-function flowc_mlir_body_is_simple_return(arena: AstArena, src: ptr<u8>, body: i32, fn_id: i32) -> i32 {
+# 1 when every statement in the body is straight-line integer/bool work this
+# slice can lower faithfully, else 0.
+function flowc_mlir_body_supported(arena: AstArena, src: ptr<u8>, body: i32, fn_id: i32, scope: ptr<MlirScope>) -> i32 {
     if body == AST_NONE {
         return 0
     }
-    let first: i32 = arena.nodes[body].a
-    if first == AST_NONE {
-        return 0
-    }
-    if arena.nodes[first].next != AST_NONE {
-        return 0
-    }
-    if arena.nodes[first].kind != AST_RETURN {
-        return 0
-    }
-    let expr: i32 = arena.nodes[first].a
-    if expr == AST_NONE {
-        return 0
-    }
     let rty: i32 = arena.nodes[fn_id].b
-    # Faithful lowering only when the declared return is i32 or bool.
-    if rty != AST_NONE {
-        let s: i32 = arena.nodes[rty].name_start
-        let e: i32 = arena.nodes[rty].name_end
-        if flowc_mlir_span_eq(src, s, e, "i32") == 0 and flowc_mlir_span_eq(src, s, e, "bool") == 0 {
+    let is_void: i32 = flowc_mlir_ret_is_void(rty)
+    let is_bool: i32 = flowc_mlir_ret_is_bool(arena, src, rty)
+    # Non-void return must be i32 or bool.
+    if is_void == 0 {
+        if flowc_mlir_type_is_i32(arena, src, rty) == 0 and is_bool == 0 {
             return 0
         }
-    } else {
-        return 0
     }
-    return flowc_mlir_expr_supported(arena, src, expr, fn_id)
+    let mut st: i32 = arena.nodes[body].a
+    while st != AST_NONE {
+        let k: i32 = arena.nodes[st].kind
+        let is_last: i32 = 0
+        if k == AST_LET {
+            # Local must be i32 with a supported i32 initializer.
+            if flowc_mlir_type_is_i32(arena, src, arena.nodes[st].a) == 0 {
+                return 0
+            }
+            if flowc_mlir_expr_supported(arena, src, arena.nodes[st].b, fn_id, scope) == 0 {
+                return 0
+            }
+            flowc_mlir_scope_set(scope, src, arena.nodes[st].name_start, arena.nodes[st].name_end, 0)
+        } else {
+            if k == AST_ASSIGN {
+                if arena.nodes[arena.nodes[st].a].kind != AST_IDENT {
+                    return 0
+                }
+                if flowc_mlir_expr_supported(arena, src, arena.nodes[st].b, fn_id, scope) == 0 {
+                    return 0
+                }
+            } else {
+                if k == AST_EXPR_STMT {
+                    if flowc_mlir_expr_supported(arena, src, arena.nodes[st].a, fn_id, scope) == 0 {
+                        return 0
+                    }
+                } else {
+                    if k == AST_RETURN {
+                        # Return is allowed only as the final statement.
+                        if arena.nodes[st].next != AST_NONE {
+                            return 0
+                        }
+                        if is_void == 1 {
+                            if arena.nodes[st].a != AST_NONE {
+                                return 0
+                            }
+                        } else {
+                            if is_bool == 1 {
+                                if flowc_mlir_cmp_supported(arena, src, arena.nodes[st].a, fn_id, scope) == 0 {
+                                    return 0
+                                }
+                            } else {
+                                if flowc_mlir_expr_supported(arena, src, arena.nodes[st].a, fn_id, scope) == 0 {
+                                    return 0
+                                }
+                            }
+                        }
+                    } else {
+                        return 0
+                    }
+                }
+            }
+        }
+        st = arena.nodes[st].next
+    }
+    # A non-void function must end in a return; require the last statement to be
+    # one. Re-scan for the final kind.
+    if is_void == 0 {
+        let mut last: i32 = AST_NONE
+        let mut s2: i32 = arena.nodes[body].a
+        while s2 != AST_NONE {
+            last = s2
+            s2 = arena.nodes[s2].next
+        }
+        if last == AST_NONE {
+            return 0
+        }
+        if arena.nodes[last].kind != AST_RETURN {
+            return 0
+        }
+    }
+    return 1
 }
 
-function flowc_mlir_emit_fn(w: ptr<MlirBuf>, arena: AstArena, src: ptr<u8>, fn_id: i32) {
+# Emit one statement of a supported straight-line body.
+function flowc_mlir_emit_stmt(w: ptr<MlirBuf>, arena: AstArena, src: ptr<u8>, st: i32, fn_id: i32, scope: ptr<MlirScope>) {
+    let k: i32 = arena.nodes[st].kind
+    if k == AST_LET {
+        let v: i32 = flowc_mlir_emit_expr(w, arena, src, arena.nodes[st].b, fn_id, scope)
+        flowc_mlir_scope_set(scope, src, arena.nodes[st].name_start, arena.nodes[st].name_end, v)
+        return
+    }
+    if k == AST_ASSIGN {
+        let lhs: i32 = arena.nodes[st].a
+        let v: i32 = flowc_mlir_emit_expr(w, arena, src, arena.nodes[st].b, fn_id, scope)
+        flowc_mlir_scope_set(scope, src, arena.nodes[lhs].name_start, arena.nodes[lhs].name_end, v)
+        return
+    }
+    if k == AST_EXPR_STMT {
+        let _v: i32 = flowc_mlir_emit_expr(w, arena, src, arena.nodes[st].a, fn_id, scope)
+        return
+    }
+    if k == AST_RETURN {
+        let rty: i32 = arena.nodes[fn_id].b
+        if flowc_mlir_ret_is_void(rty) == 1 {
+            flowc_mlir_puts(w, "    return\n")
+            return
+        }
+        let mut code: i32 = 0 - 1
+        if flowc_mlir_ret_is_bool(arena, src, rty) == 1 {
+            code = flowc_mlir_emit_cmp(w, arena, src, arena.nodes[st].a, fn_id, scope)
+        } else {
+            code = flowc_mlir_emit_expr(w, arena, src, arena.nodes[st].a, fn_id, scope)
+        }
+        flowc_mlir_puts(w, "    return ")
+        flowc_mlir_put_ref(w, code)
+        flowc_mlir_puts(w, " : ")
+        flowc_mlir_put_type(w, arena, src, rty)
+        flowc_mlir_puts(w, "\n")
+        return
+    }
+}
+
+function flowc_mlir_emit_fn(w: ptr<MlirBuf>, arena: AstArena, src: ptr<u8>, fn_id: i32, scope: ptr<MlirScope>) {
     # Skip forward declarations and generic functions in this slice.
     if arena.nodes[fn_id].c == AST_NONE {
         return
@@ -412,6 +626,7 @@ function flowc_mlir_emit_fn(w: ptr<MlirBuf>, arena: AstArena, src: ptr<u8>, fn_i
         return
     }
     w[0].nval = 0
+    scope[0].n = 0
 
     flowc_mlir_puts(w, "  func.func @")
     flowc_mlir_put_span(w, src, arena.nodes[fn_id].name_start, arena.nodes[fn_id].name_end)
@@ -439,19 +654,21 @@ function flowc_mlir_emit_fn(w: ptr<MlirBuf>, arena: AstArena, src: ptr<u8>, fn_i
     flowc_mlir_puts(w, " {\n")
 
     let body: i32 = arena.nodes[fn_id].c
-    if flowc_mlir_ret_is_void(rty) == 1 {
-        flowc_mlir_puts(w, "    return\n")
+    scope[0].n = 0
+    if flowc_mlir_body_supported(arena, src, body, fn_id, scope) == 1 {
+        scope[0].n = 0
+        let mut st: i32 = arena.nodes[body].a
+        while st != AST_NONE {
+            flowc_mlir_emit_stmt(w, arena, src, st, fn_id, scope)
+            st = arena.nodes[st].next
+        }
+        if flowc_mlir_ret_is_void(rty) == 1 {
+            flowc_mlir_puts(w, "    return\n")
+        }
     } else {
-        if flowc_mlir_body_is_simple_return(arena, src, body, fn_id) == 1 {
-            let expr: i32 = arena.nodes[arena.nodes[body].a].a
-            let code: i32 = flowc_mlir_emit_expr(w, arena, src, expr, fn_id)
-            flowc_mlir_puts(w, "    return ")
-            flowc_mlir_put_ref(w, code)
-            flowc_mlir_puts(w, " : ")
-            flowc_mlir_put_type(w, arena, src, rty)
-            flowc_mlir_puts(w, "\n")
+        if flowc_mlir_ret_is_void(rty) == 1 {
+            flowc_mlir_puts(w, "    return\n")
         } else {
-            # Valid typed stub for constructs beyond this slice.
             let z: i32 = flowc_mlir_emit_zero(w, arena, src, rty)
             flowc_mlir_puts(w, "    return %v")
             flowc_mlir_put_i32(w, z)
@@ -489,6 +706,17 @@ export function flowc_mlir_gen_emit(arena: AstArena, root: i32, src: ptr<u8>, ou
         return 0 - 1
     }
     let mut w: MlirBuf = flowc_mlir_buf_init(out, out_cap)
+
+    # Local-binding scope, reused across functions.
+    let cap: i32 = 256
+    let mut scope: MlirScope = MlirScope {
+        ns: malloc((cap as i64) * 4),
+        ne: malloc((cap as i64) * 4),
+        refs: malloc((cap as i64) * 4),
+        n: 0,
+        cap: cap
+    }
+
     flowc_mlir_puts(&w, "// Generated by flowc Stage-A MLIR backend\n")
     flowc_mlir_puts(&w, "module {\n")
 
@@ -496,12 +724,15 @@ export function flowc_mlir_gen_emit(arena: AstArena, root: i32, src: ptr<u8>, ou
     while item != AST_NONE {
         let fn: i32 = flowc_mlir_unwrap_fn(arena, item)
         if fn != AST_NONE {
-            flowc_mlir_emit_fn(&w, arena, src, fn)
+            flowc_mlir_emit_fn(&w, arena, src, fn, &scope)
         }
         item = arena.nodes[item].next
     }
 
     flowc_mlir_puts(&w, "}\n")
+    free(scope.ns)
+    free(scope.ne)
+    free(scope.refs)
     if w.err != 0 {
         return 0 - 1
     }

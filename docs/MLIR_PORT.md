@@ -16,18 +16,21 @@ subdirectory layout.
 
 ## Status
 
-The first slice is landed. `compiler/src/mlir_gen.flow` is wired into
-`main.flow` under `FLOWC_BACKEND=mlir` and ships in the checked-in bootstrap
-(fixed point verified). It emits one `func.func` per Flow function with typed
-block arguments and a typed return. A function whose body is a single return of
-a supported expression (integer and bool literals, parameters, integer
-arithmetic, integer comparisons) lowers faithfully to the `func` and `arith`
-dialects. Every other function emits a valid typed zero-return stub, so the
-whole module is always MLIR the tools accept. `mlir-opt` parses, verifies, and
-canonicalizes the output.
+`compiler/src/mlir_gen.flow` is wired into `main.flow` under
+`FLOWC_BACKEND=mlir` and ships in the checked-in bootstrap (fixed point
+verified). It emits one `func.func` per Flow function with typed block arguments
+and a typed return.
 
-Still to do: local bindings, calls, control flow (`scf`/`cf`), and floats, then
-the canonicalize, optimizer, backend, and JIT phases below.
+Faithful lowering covers straight-line integer and bool functions: parameters,
+`i32` local `let` bindings, assignments (rebound in SSA form since there are no
+control-flow merges yet), integer arithmetic (`arith.addi`/`subi`/`muli`/
+`divsi`/`remsi`), unary minus, integer comparisons (`arith.cmpi`), and a
+trailing return. Every other function emits a valid typed zero-return stub, so
+the whole module is always MLIR the tools accept. `mlir-opt` parses, verifies,
+and canonicalizes the output.
+
+Still to do: floats, calls, and control flow (`scf`/`cf`), then the
+canonicalize, optimizer, backend, and JIT phases below.
 
 ## Source-to-target map
 
