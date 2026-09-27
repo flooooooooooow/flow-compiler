@@ -29,8 +29,12 @@ trailing return. Every other function emits a valid typed zero-return stub, so
 the whole module is always MLIR the tools accept. `mlir-opt` parses, verifies,
 and canonicalizes the output.
 
-Still to do: floats, calls, and control flow (`scf`/`cf`), then the
-canonicalize, optimizer, backend, and JIT phases below.
+Pure-float functions (all parameters and the return one of `f64`/`f32`) whose
+body is a single return also lower faithfully, to `arith.addf`/`subf`/`mulf`/
+`divf`/`negf` with float constants. Mixed int and float signatures still stub.
+
+Still to do: multi-statement floats, calls, and control flow (`scf`/`cf`), then
+the canonicalize, optimizer, backend, and JIT phases below.
 
 ## Source-to-target map
 
