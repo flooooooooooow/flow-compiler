@@ -1,0 +1,274 @@
+# @module flowc.mlir.mlir_emit
+# @means  The MLIR emitter entry points for the Flow-in-Flow compiler.
+#         Port of the MLIRGenerator class and the flow_to_mlir top-level in
+#         src/flow/mlir_generator.py (about 7.4k lines).
+#
+# The Python MLIRGenerator walks the declaration list and returns MLIR text.
+# Each generate_* method returns either a block of text (statements) or a
+# (result_ssa, ops) pair (expressions). This port threads an MlirEmitter that
+# holds the SSA counter, the indent depth, the target word size, and the type
+# and op arenas. Expression emitters return an SSA number and append their ops
+# to the op arena; statement emitters append to the current block. A caller
+# renders the arenas to text at the end.
+#
+# Skeleton only. The emitter struct and the entry-point signatures mirror the
+# Python public surface; bodies are stubs marked TODO(port).
+
+import ..ast { AstArena, AST_NONE }
+import .mlir_types { MlirTypeArena, flowc_mlir_types_new }
+import .mlir_ops { MlirOpArena, flowc_mlir_ops_new }
+
+extern {
+    function malloc(size: i64) -> ptr<u8>
+    function free(p: ptr<u8>) -> void
+}
+
+# Default source-file label, matching flow_to_mlir's "unknown.flow".
+export const MLIR_DEFAULT_SOURCE: i32 = 0
+
+# function_counter = the running SSA name counter (Python function_counter).
+# indent_level     = current block nesting for indent().
+# size_t_bits      = 64 or 32; on 32-bit the emitter skips alloca spills and
+#                    the ASYNCIFY-hostile patterns (flow#467).
+# emit_gpu         = 1 to also emit the gpu module.
+# emit_debug       = 1 to attach location metadata.
+# types            = pointer to the shared type arena.
+# ops              = pointer to the shared op arena.
+export struct MlirEmitter {
+    function_counter: i32,
+    indent_level: i32,
+    size_t_bits: i32,
+    emit_gpu: i32,
+    emit_debug: i32,
+    types: ptr<MlirTypeArena>,
+    ops: ptr<MlirOpArena>
+}
+
+# --- Emitter lifecycle ------------------------------------------
+
+# Build an emitter over caller-owned type and op arenas. size_t_bits is 64 or
+# 32. Mirrors MLIRGenerator.__init__.
+export function flowc_mlir_emitter_new(
+    types: ptr<MlirTypeArena>,
+    ops: ptr<MlirOpArena>,
+    size_t_bits: i32
+) -> MlirEmitter {
+    return MlirEmitter {
+        function_counter: 0,
+        indent_level: 0,
+        size_t_bits: size_t_bits,
+        emit_gpu: 0,
+        emit_debug: 0,
+        types: types,
+        ops: ops
+    }
+}
+
+# Take the next SSA number and advance the counter. This is the %N allocation
+# the Python emitter does inline with self.function_counter.
+export function flowc_mlir_fresh_ssa(emitter: ptr<MlirEmitter>) -> i32 {
+    let n: i32 = emitter[0].function_counter
+    emitter[0].function_counter = n + 1
+    return n
+}
+
+# --- Statement and declaration entry points ---------------------
+
+# Emit a whole module from the program's declaration list. Port of
+# generate_module. Returns bytes written to out (cap bytes), or negative on
+# overflow.
+export function flowc_mlir_generate_module(
+    emitter: ptr<MlirEmitter>,
+    ast: AstArena,
+    program_id: i32,
+    emit_gpu: i32,
+    out: ptr<u8>,
+    cap: i32
+) -> i32 {
+    # TODO(port): walk each top-level decl (func, struct, const, effect) and
+    # concatenate their emitted text, then the gpu module when emit_gpu is set.
+    return 0
+}
+
+# Emit one function, its entry block, and its body. Port of generate_function.
+export function flowc_mlir_generate_function(
+    emitter: ptr<MlirEmitter>,
+    ast: AstArena,
+    fn_id: i32,
+    out: ptr<u8>,
+    cap: i32
+) -> i32 {
+    # TODO(port): render the func.func signature, then the block, then the
+    # terminator.
+    return 0
+}
+
+# Emit a block's statements in order. Port of generate_block.
+export function flowc_mlir_generate_block(
+    emitter: ptr<MlirEmitter>,
+    ast: AstArena,
+    block_id: i32,
+    out: ptr<u8>,
+    cap: i32
+) -> i32 {
+    # TODO(port): iterate the statement chain, dispatching to
+    # flowc_mlir_generate_statement.
+    return 0
+}
+
+# Dispatch one statement to its emitter (let, return, assign, if, while, for,
+# match, expr-stmt). Port of generate_statement. Returns bytes written.
+export function flowc_mlir_generate_statement(
+    emitter: ptr<MlirEmitter>,
+    ast: AstArena,
+    stmt_id: i32,
+    out: ptr<u8>,
+    cap: i32
+) -> i32 {
+    # TODO(port): switch on the AST node kind and call the matching emitter.
+    return 0
+}
+
+# Emit a local binding: evaluate the initializer, then bind or spill it. Port
+# of generate_var_decl.
+export function flowc_mlir_generate_var_decl(
+    emitter: ptr<MlirEmitter>,
+    ast: AstArena,
+    let_id: i32,
+    out: ptr<u8>,
+    cap: i32
+) -> i32 {
+    # TODO(port): evaluate the init expr, decide alloca vs SSA, record the
+    # binding in the symbol table.
+    return 0
+}
+
+# Emit a return. Port of generate_return.
+export function flowc_mlir_generate_return(
+    emitter: ptr<MlirEmitter>,
+    ast: AstArena,
+    return_id: i32,
+    out: ptr<u8>,
+    cap: i32
+) -> i32 {
+    # TODO(port): evaluate the value expr and emit func.return.
+    return 0
+}
+
+# Emit an if / elif / else as structured control flow. Port of generate_if.
+export function flowc_mlir_generate_if(
+    emitter: ptr<MlirEmitter>,
+    ast: AstArena,
+    if_id: i32,
+    out: ptr<u8>,
+    cap: i32
+) -> i32 {
+    # TODO(port): lower to cf.cond_br with merge-block SSA operands.
+    return 0
+}
+
+# Emit a while loop. Port of generate_while.
+export function flowc_mlir_generate_while(
+    emitter: ptr<MlirEmitter>,
+    ast: AstArena,
+    while_id: i32,
+    out: ptr<u8>,
+    cap: i32
+) -> i32 {
+    # TODO(port): header block, cond_br, body block, back-edge.
+    return 0
+}
+
+# Emit a for loop over a numeric range. Port of generate_for.
+export function flowc_mlir_generate_for(
+    emitter: ptr<MlirEmitter>,
+    ast: AstArena,
+    for_id: i32,
+    out: ptr<u8>,
+    cap: i32
+) -> i32 {
+    # TODO(port): induction variable, bound check, step, back-edge.
+    return 0
+}
+
+# --- Expression entry points ------------------------------------
+
+# Evaluate an expression, appending its ops to the op arena, and return the SSA
+# number of its result. Port of generate_expression, whose Python signature
+# returns (result_ssa, ops). The ops land in emitter.ops instead of a returned
+# list.
+export function flowc_mlir_generate_expression(
+    emitter: ptr<MlirEmitter>,
+    ast: AstArena,
+    expr_id: i32
+) -> i32 {
+    # TODO(port): switch on expr kind (literal, variable, binop, unary, call,
+    # field access, index, struct literal) and delegate.
+    return AST_NONE
+}
+
+# Emit an integer / float / bool / string literal. Port of generate_literal.
+export function flowc_mlir_generate_literal(
+    emitter: ptr<MlirEmitter>,
+    ast: AstArena,
+    literal_id: i32
+) -> i32 {
+    # TODO(port): arith.constant for numerics, llvm string global for strings.
+    return AST_NONE
+}
+
+# Load a variable's current SSA value, reloading from its alloca slot when the
+# binding is aggregate. Port of generate_variable.
+export function flowc_mlir_generate_variable(
+    emitter: ptr<MlirEmitter>,
+    ast: AstArena,
+    var_id: i32
+) -> i32 {
+    # TODO(port): look up the binding, reload if spilled.
+    return AST_NONE
+}
+
+# Emit a binary operation, inserting the width or int-to-float coercions the
+# operand types require. Port of generate_binary_operation.
+export function flowc_mlir_generate_binary_operation(
+    emitter: ptr<MlirEmitter>,
+    ast: AstArena,
+    binop_id: i32
+) -> i32 {
+    # TODO(port): evaluate both sides, unify types, emit the arith op.
+    return AST_NONE
+}
+
+# Emit a direct call. Port of generate_function_call.
+export function flowc_mlir_generate_function_call(
+    emitter: ptr<MlirEmitter>,
+    ast: AstArena,
+    call_id: i32
+) -> i32 {
+    # TODO(port): evaluate arguments, emit func.call, capture the result.
+    return AST_NONE
+}
+
+# --- Top level --------------------------------------------------
+
+# Port of the flow_to_mlir top-level. Build an emitter, emit the module, and
+# write the MLIR text to out (cap bytes). When denotational is set, the
+# denotational flow.* dialect for the file's evolution blocks is prepended
+# ahead of the operational lowering (see docs/design/denotational-mlir.md and
+# the future compiler/src/mlir/denotational.flow). Returns bytes written, or
+# negative on overflow.
+export function flowc_flow_to_mlir(
+    ast: AstArena,
+    program_id: i32,
+    source_file: i32,
+    emit_gpu: i32,
+    emit_debug: i32,
+    size_t_bits: i32,
+    denotational: i32,
+    out: ptr<u8>,
+    cap: i32
+) -> i32 {
+    # TODO(port): allocate the arenas, build the emitter, call
+    # flowc_mlir_generate_module, and optionally prepend the denotational lane.
+    return 0
+}

@@ -1,0 +1,14 @@
+[package]
+name = "flow-compiler"
+version = "0.1.0"
+description = "The Flow language compiler, written in Flow"
+license = "Proprietary"
+entry = "compiler/src/main.flow"
+
+[paths]
+compiler = "compiler/src"
+tests = "tests/lang"
+
+[build]
+host = "flowc"
+bootstrap = "compiler/bootstrap/flowc_stage_a.c"

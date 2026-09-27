@@ -1,0 +1,152 @@
+# @module flowc.mlir.backends.wgsl
+# @means  WebGPU Shading Language codegen for @gpu compute kernels.
+#         Port of src/flow/wgsl_codegen.py (WgslCodegen.generate_kernel,
+#         binding_layout, extract_gpu_functions, generate_wgsl_shaders).
+#
+# The sibling of the Metal backend: same AST in, WGSL out. Two places where
+# WGSL is stricter than MSL shape the port.
+#
+# Buffers carry an access mode. A storage binding is `read` or `read_write`,
+# decided per parameter by whether the body writes through it. That write
+# analysis walks the AST rather than guessing from the name.
+#
+# Scalars cannot be loose bindings. All scalar parameters are packed into one
+# Params uniform struct, padded to a multiple of 16 bytes, and referenced as
+# params.<name>.
+#
+# WGSL has no f64 and no 64-bit integers, and a compute entry point returns
+# nothing. Those cases surface as an error tag rather than silent output.
+#
+# Skeleton only. Struct and signature shapes are settled; bodies are stubs
+# marked TODO(port).
+
+import ...ast { AstArena, AST_NONE, AST_FN }
+
+extern {
+    function malloc(size: i64) -> ptr<u8>
+    function free(p: ptr<u8>) -> void
+    function strlen(s: string) -> i64
+}
+
+# --- Text writer ------------------------------------------------
+
+struct WgslBuf {
+    out: ptr<u8>,
+    cap: i32,
+    len: i32,
+    indent: i32,
+    err: i32
+}
+
+# --- Error tags -------------------------------------------------
+# Constructs the WGSL backend cannot express, the port's equivalent of the
+# WgslUnsupported exception in the Python module. An emit returns one of these
+# as a negative value.
+
+export const WGSL_OK: i32 = 0
+export const WGSL_ERR_UNSUPPORTED_TYPE: i32 = 1
+export const WGSL_ERR_UNSUPPORTED_STMT: i32 = 2
+export const WGSL_ERR_UNSUPPORTED_CALL: i32 = 3
+export const WGSL_ERR_RETURN_VALUE: i32 = 4
+
+# --- Bindings ---------------------------------------------------
+# A binding is a storage buffer or the single uniform Params block. kind holds
+# one of the two tags below; access is meaningful for storage buffers only.
+
+export const WGSL_BIND_STORAGE: i32 = 0
+export const WGSL_BIND_UNIFORM: i32 = 1
+
+export const WGSL_ACCESS_READ: i32 = 0
+export const WGSL_ACCESS_READ_WRITE: i32 = 1
+
+struct WgslBinding {
+    name_start: i32,
+    name_end: i32,
+    binding: i32,
+    kind: i32,
+    access: i32
+}
+
+# --- Type mapping -----------------------------------------------
+# Flow scalar to WGSL scalar: i32->i32, u32->u32, f32->f32, bool->bool.
+# i64, u64, and f64 have no core WGSL equivalent and return
+# WGSL_ERR_UNSUPPORTED_TYPE. Mirror of WgslCodegen.scalar_type.
+# Writes the WGSL type text into out and returns its byte length, or a negative
+# error tag.
+export function flowc_wgsl_scalar_type(
+    arena: AstArena,
+    src: ptr<u8>,
+    ty: i32,
+    out: ptr<u8>,
+    cap: i32
+) -> i32 {
+    # TODO(port): map the supported scalars and reject i64/u64/f64.
+    return 0
+}
+
+# Decide whether a buffer parameter is written through in the body, which sets
+# read vs read_write on its storage binding.
+# Mirror of WgslCodegen._written_buffers.
+export function flowc_wgsl_param_is_written(
+    arena: AstArena,
+    body: i32,
+    param_name_start: i32,
+    param_name_end: i32,
+    src: ptr<u8>
+) -> i32 {
+    # TODO(port): walk the body for assignment targets whose base identifier is
+    # this parameter, descending through array and field access.
+    return 0
+}
+
+# --- Kernel emission --------------------------------------------
+
+# Emit one WGSL compute shader for a single @gpu function node.
+# Mirror of WgslCodegen.generate_kernel.
+# Returns the number of bytes written, or a negative error tag.
+export function flowc_wgsl_emit_kernel(
+    arena: AstArena,
+    fn: i32,
+    src: ptr<u8>,
+    workgroup_size: i32,
+    out: ptr<u8>,
+    cap: i32
+) -> i32 {
+    # TODO(port): emit the WORKGROUP_SIZE const, the storage bindings with
+    # decided access, the packed Params uniform block, the @compute entry point
+    # with the builtin ids, the tid binding, then the lowered body.
+    return 0
+}
+
+# Emit the binding layout a WebGPU host needs to build the bind group: the
+# entry point name, workgroup size, storage buffers, scalar params, and the
+# padded params byte size. Mirror of WgslCodegen.binding_layout.
+# Emitted as JSON next to the .wgsl so the host never re-parses Flow.
+export function flowc_wgsl_binding_layout_emit(
+    arena: AstArena,
+    fn: i32,
+    src: ptr<u8>,
+    workgroup_size: i32,
+    out: ptr<u8>,
+    cap: i32
+) -> i32 {
+    # TODO(port): serialize the binding_layout dict as JSON.
+    return 0
+}
+
+# --- Module entry point -----------------------------------------
+
+# Emit WGSL shaders for every @gpu function in the arena.
+# Mirror of extract_gpu_functions + generate_wgsl_shaders, in the emitter
+# convention shared with flowc_wgsl_emit in the current tree.
+# Returns the number of bytes written, or a negative error tag.
+export function flowc_wgsl_emit(
+    arena: AstArena,
+    src: ptr<u8>,
+    out: ptr<u8>,
+    cap: i32
+) -> i32 {
+    # TODO(port): walk AST_FN nodes carrying the gpu attribute and emit a
+    # shader each via flowc_wgsl_emit_kernel, with workgroup size 64 by default.
+    return 0
+}

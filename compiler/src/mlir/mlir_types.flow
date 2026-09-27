@@ -1,0 +1,225 @@
+# @module flowc.mlir.mlir_types
+# @means  The MLIR type model for the Flow-in-Flow compiler.
+#         Port of the type mapping in src/flow/mlir_generator.py
+#         (flow_type_to_mlir, around line 6695) plus the struct/tensor
+#         helpers near the top of that file.
+#
+# The Python emitter carries MLIR types as plain strings ("i32", "f64",
+# "!llvm.ptr", "memref<?xf32>", "!flow.struct<Note>"). This port keeps the
+# same shapes as tagged records in an index-based arena, the same convention
+# the parser uses in ast.flow. A caller builds a type, then renders it to text
+# once at emit time.
+#
+# Skeleton only. Struct and signature shapes are settled; bodies are stubs
+# marked TODO(port) until the mapping is filled in.
+
+import ..ast { AstArena, AST_NONE }
+
+extern {
+    function malloc(size: i64) -> ptr<u8>
+    function free(p: ptr<u8>) -> void
+}
+
+# --- Type kinds -------------------------------------------------
+
+export const MTYPE_NONE: i32 = 0
+# iN of a fixed width. Flow uN maps to iN of the same width (MLIR and the llvm
+# dialect have no unsigned integer types); zero-extension uses arith.extui.
+export const MTYPE_INT: i32 = 1
+# f32 / f64. width holds 32 or 64.
+export const MTYPE_FLOAT: i32 = 2
+# void, rendered "()" for function results.
+export const MTYPE_VOID: i32 = 3
+# !llvm.ptr. Covers string, ptr<T>, and struct/pointer array elements.
+export const MTYPE_PTR: i32 = 4
+# memref<SIZExELEM>. elem is a type id; size is the static length, or 0 for the
+# dynamic "?" extent.
+export const MTYPE_MEMREF: i32 = 5
+# vector<SIZExELEM>, used by the vec* Flow types.
+export const MTYPE_VECTOR: i32 = 6
+# !flow.struct<Name>. name_start/name_end span the struct name in the source.
+export const MTYPE_FLOW_STRUCT: i32 = 7
+# A raw llvm dialect struct such as
+# !llvm.struct<(!llvm.ptr, i32, i32, i32, i32, i32)>. text_start/text_end span
+# the verbatim type text held in the emitter's text buffer.
+export const MTYPE_LLVM_STRUCT: i32 = 8
+# (params...) -> ret. elem is the return type id; the parameter type ids hang
+# off the child chain via next, first entry being the closure environment ptr.
+export const MTYPE_FUNC: i32 = 9
+
+# Dynamic extent marker for memref/vector size fields.
+export const MTYPE_DYNAMIC: i32 = 0
+
+# kind        = one of the MTYPE_* tags above.
+# width       = bit width for MTYPE_INT (1, 8, 16, 32, 64, 128) and MTYPE_FLOAT
+#               (32, 64); 0 otherwise.
+# size        = static extent for MTYPE_MEMREF / MTYPE_VECTOR, or MTYPE_DYNAMIC.
+# elem        = element type id for memref/vector, return type id for func,
+#               else AST_NONE.
+# next        = sibling chain, used for function parameter type lists.
+# name_start / name_end = source span of a struct name (MTYPE_FLOW_STRUCT).
+# text_start / text_end = span of verbatim type text (MTYPE_LLVM_STRUCT).
+export struct MlirType {
+    kind: i32,
+    width: i32,
+    size: i32,
+    elem: i32,
+    next: i32,
+    name_start: i32,
+    name_end: i32,
+    text_start: i32,
+    text_end: i32
+}
+
+export struct MlirTypeArena {
+    types: ptr<MlirType>,
+    len: i32,
+    cap: i32
+}
+
+# --- Arena lifecycle --------------------------------------------
+
+# Allocate a type arena with room for cap entries. Mirrors flowc_ast_new.
+export function flowc_mlir_types_new(cap: i32) -> MlirTypeArena {
+    let size: i64 = (cap as i64) * 36
+    let raw: ptr<u8> = malloc(size)
+    let types: ptr<MlirType> = raw
+    # TODO(port): zero every slot the way flowc_ast_new does.
+    return MlirTypeArena { types: types, len: 0, cap: cap }
+}
+
+export function flowc_mlir_types_free(arena: MlirTypeArena) -> void {
+    let raw: ptr<u8> = arena.types
+    free(raw)
+}
+
+# Reserve a fresh type node of the given kind and return its id, or AST_NONE
+# when the arena is full.
+export function flowc_mlir_type_alloc(arena: ptr<MlirTypeArena>, kind: i32) -> i32 {
+    if arena[0].len >= arena[0].cap {
+        return AST_NONE
+    }
+    let id: i32 = arena[0].len
+    arena[0].len = id + 1
+    arena[0].types[id].kind = kind
+    arena[0].types[id].width = 0
+    arena[0].types[id].size = MTYPE_DYNAMIC
+    arena[0].types[id].elem = AST_NONE
+    arena[0].types[id].next = AST_NONE
+    arena[0].types[id].name_start = 0
+    arena[0].types[id].name_end = 0
+    arena[0].types[id].text_start = 0
+    arena[0].types[id].text_end = 0
+    return id
+}
+
+# --- Constructors -----------------------------------------------
+
+# iN. width is one of 1, 8, 16, 32, 64, 128.
+export function flowc_mlir_type_int(arena: ptr<MlirTypeArena>, width: i32) -> i32 {
+    let id: i32 = flowc_mlir_type_alloc(arena, MTYPE_INT)
+    if id == AST_NONE {
+        return AST_NONE
+    }
+    arena[0].types[id].width = width
+    return id
+}
+
+# f32 or f64. width is 32 or 64.
+export function flowc_mlir_type_float(arena: ptr<MlirTypeArena>, width: i32) -> i32 {
+    let id: i32 = flowc_mlir_type_alloc(arena, MTYPE_FLOAT)
+    if id == AST_NONE {
+        return AST_NONE
+    }
+    arena[0].types[id].width = width
+    return id
+}
+
+# !llvm.ptr. The single pointer type covers string, ptr<T>, and aggregate
+# array elements.
+export function flowc_mlir_type_ptr(arena: ptr<MlirTypeArena>) -> i32 {
+    return flowc_mlir_type_alloc(arena, MTYPE_PTR)
+}
+
+# void, rendered "()".
+export function flowc_mlir_type_void(arena: ptr<MlirTypeArena>) -> i32 {
+    return flowc_mlir_type_alloc(arena, MTYPE_VOID)
+}
+
+# memref<SIZExELEM>. Pass size = MTYPE_DYNAMIC for the "?" extent. Callers that
+# hand in a struct or pointer element should map to MTYPE_PTR instead, matching
+# the Python guard that memref cannot hold llvm.struct or llvm.ptr elements.
+export function flowc_mlir_type_memref(arena: ptr<MlirTypeArena>, elem: i32, size: i32) -> i32 {
+    let id: i32 = flowc_mlir_type_alloc(arena, MTYPE_MEMREF)
+    if id == AST_NONE {
+        return AST_NONE
+    }
+    arena[0].types[id].elem = elem
+    arena[0].types[id].size = size
+    return id
+}
+
+# vector<SIZExELEM> for the vec* Flow types.
+export function flowc_mlir_type_vector(arena: ptr<MlirTypeArena>, elem: i32, size: i32) -> i32 {
+    let id: i32 = flowc_mlir_type_alloc(arena, MTYPE_VECTOR)
+    if id == AST_NONE {
+        return AST_NONE
+    }
+    arena[0].types[id].elem = elem
+    arena[0].types[id].size = size
+    return id
+}
+
+# !flow.struct<Name>. The name span points into the AST source buffer.
+export function flowc_mlir_type_flow_struct(
+    arena: ptr<MlirTypeArena>,
+    name_start: i32,
+    name_end: i32
+) -> i32 {
+    let id: i32 = flowc_mlir_type_alloc(arena, MTYPE_FLOW_STRUCT)
+    if id == AST_NONE {
+        return AST_NONE
+    }
+    arena[0].types[id].name_start = name_start
+    arena[0].types[id].name_end = name_end
+    return id
+}
+
+# --- Mapping and rendering --------------------------------------
+
+# Map a Flow AST_TYPE node to an MLIR type node, returning the new type id.
+# This is the port of MLIRGenerator.flow_type_to_mlir. It resolves aliases,
+# folds Flow uN to iN, and picks memref / vector / ptr / flow.struct shapes the
+# same way the Python emitter does.
+export function flowc_flow_type_to_mlir(
+    tarena: ptr<MlirTypeArena>,
+    ast: AstArena,
+    type_id: i32
+) -> i32 {
+    # TODO(port): resolve the AST_TYPE node, read its name span, and dispatch
+    # to the constructors above. For now report "unmapped".
+    return AST_NONE
+}
+
+# Return 1 when the type is an aggregate that needs alloca-backed storage
+# (llvm.struct or the tensor descriptor struct), else 0. Mirrors
+# _is_aggregate_mlir_type.
+export function flowc_mlir_type_is_aggregate(arena: AstArena, tarena: MlirTypeArena, id: i32) -> i32 {
+    # TODO(port): true for MTYPE_LLVM_STRUCT and the tensor descriptor struct.
+    return 0
+}
+
+# Render a type id to its MLIR text spelling into out (a caller-owned buffer of
+# cap bytes). Returns the number of bytes written, or a negative value on
+# overflow. This is the inverse of the string-typed representation the Python
+# emitter carries directly.
+export function flowc_mlir_type_render(
+    tarena: MlirTypeArena,
+    id: i32,
+    out: ptr<u8>,
+    cap: i32
+) -> i32 {
+    # TODO(port): switch on kind and print "i32", "f64", "!llvm.ptr",
+    # "memref<?xf32>", "!flow.struct<Name>", "() -> i32", and so on.
+    return 0
+}

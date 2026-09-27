@@ -1,0 +1,120 @@
+# @module flowc.mlir.backends.metal
+# @means  Metal Shading Language codegen for @gpu compute kernels.
+#         Port of src/flow/metal_codegen.py (MetalCodegen.generate_kernel,
+#         generate_host_code, extract_gpu_functions, generate_metal_shaders).
+#
+# Each @gpu function becomes one Metal compute kernel. Array and pointer
+# parameters map to `device T*` buffer bindings; scalar parameters map to
+# `constant T&` buffer bindings. Buffers are numbered in declaration order.
+# A trailing uint3 thread_position_in_grid gives the kernel its thread id, and
+# the GPU builtins (gpu_thread_id, gpu_barrier, ...) map to Metal intrinsics.
+# Alongside each kernel the Python module writes an Objective-C host file that
+# loads the library, binds buffers, and dispatches; the host emitter mirrors it.
+#
+# Skeleton only. Struct and signature shapes are settled; bodies are stubs
+# marked TODO(port).
+
+import ...ast { AstArena, AST_NONE, AST_FN }
+
+extern {
+    function malloc(size: i64) -> ptr<u8>
+    function free(p: ptr<u8>) -> void
+    function strlen(s: string) -> i64
+}
+
+# --- Text writer ------------------------------------------------
+
+struct MetalBuf {
+    out: ptr<u8>,
+    cap: i32,
+    len: i32,
+    indent: i32,
+    err: i32
+}
+
+# --- Buffer bindings --------------------------------------------
+# One binding per kernel parameter. is_buffer distinguishes an array/pointer
+# argument (device T*) from a scalar (constant T&). name_start/name_end span
+# the parameter name in the source, matching how the arena carries identifiers.
+
+struct MetalBinding {
+    name_start: i32,
+    name_end: i32,
+    index: i32,
+    is_buffer: i32
+}
+
+# --- Type mapping -----------------------------------------------
+# Flow scalar to Metal scalar: i32->int, i64->long, u32->uint, u64->ulong,
+# f32->float, f64->double, bool->bool, void->void. Array/pointer element types
+# become `device <elem>*`; vecN<T> becomes <metal_elem>N.
+# Writes the Metal type text into out and returns its byte length.
+export function flowc_metal_map_type(
+    arena: AstArena,
+    src: ptr<u8>,
+    ty: i32,
+    out: ptr<u8>,
+    cap: i32
+) -> i32 {
+    # TODO(port): reproduce MetalCodegen.map_type, including array_/array<>/
+    # ptr<> and vecN<T> handling.
+    return 0
+}
+
+# True when a parameter type is an array or pointer, so it binds as a buffer.
+# Mirror of MetalCodegen.is_array_type.
+export function flowc_metal_is_buffer_type(arena: AstArena, src: ptr<u8>, ty: i32) -> i32 {
+    # TODO(port): match array<, array_, ptr<, or an element_type-carrying type.
+    return 0
+}
+
+# --- Kernel emission --------------------------------------------
+
+# Emit one Metal compute kernel for a single @gpu function node.
+# Mirror of MetalCodegen.generate_kernel.
+# Returns the number of bytes written, or a negative value on error.
+export function flowc_metal_emit_kernel(
+    arena: AstArena,
+    fn: i32,
+    src: ptr<u8>,
+    out: ptr<u8>,
+    cap: i32
+) -> i32 {
+    # TODO(port): emit the metal_stdlib include, the kernel signature with
+    # buffer bindings and the uint3 thread_position_in_grid parameter, then the
+    # lowered body. See generate_kernel / generate_block / generate_statement.
+    return 0
+}
+
+# Emit the Objective-C host code that loads and dispatches a kernel.
+# Mirror of MetalCodegen.generate_host_code.
+export function flowc_metal_emit_host(
+    arena: AstArena,
+    fn: i32,
+    src: ptr<u8>,
+    shader_path: string,
+    out: ptr<u8>,
+    cap: i32
+) -> i32 {
+    # TODO(port): emit the MTLDevice/MTLLibrary/MTLComputePipelineState setup,
+    # buffer creation and binding per parameter, threadgroup dispatch, and the
+    # result copy-back for output buffers. See generate_host_code.
+    return 0
+}
+
+# --- Module entry point -----------------------------------------
+
+# Emit Metal shaders for every @gpu function in the arena.
+# Mirror of extract_gpu_functions + generate_metal_shaders, in the emitter
+# convention shared with flowc_metal_emit in the current tree.
+# Returns the number of bytes written, or a negative value on error.
+export function flowc_metal_emit(
+    arena: AstArena,
+    src: ptr<u8>,
+    out: ptr<u8>,
+    cap: i32
+) -> i32 {
+    # TODO(port): walk AST_FN nodes carrying the gpu attribute and emit a
+    # kernel each via flowc_metal_emit_kernel.
+    return 0
+}

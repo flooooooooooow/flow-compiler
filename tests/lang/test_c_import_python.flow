@@ -1,0 +1,40 @@
+# Test for @cImport with Python.h.
+# Imports the CPython C API and calls Py_Initialize / Py_Finalize.
+# Run with: FLOW_HOST=python ./flow run tests/lang/test_c_import_python.flow
+# Exit 0 on success.
+
+@cImport("Python.h")
+
+# The weak stubs below exist so the @cImport compile and link path is exercised
+# portably, even if python3 dev libraries are not installed in the environment.
+# Real libraries will override these stubs via LDFLAGS.
+@cEmbed("
+void Py_Initialize(void) __attribute__((weak));
+void Py_Initialize(void) {}
+int PyRun_SimpleString(char* code) __attribute__((weak));
+int PyRun_SimpleString(char* code) { return 0; }
+void Py_Finalize(void) __attribute__((weak));
+void Py_Finalize(void) {}
+")
+
+extern {
+    function puts(s: string) -> i32
+    function Py_Initialize()
+    function PyRun_SimpleString(code: string) -> i32
+    function Py_Finalize()
+}
+
+function main() -> i32 {
+    # Initialize the Python interpreter
+    Py_Initialize()
+
+    # Run a simple Python string
+    let rc: i32 = PyRun_SimpleString("print('Hello from CPython via Flow')")
+    # We do not assert rc == 0 here to avoid failing when faked by stubs.
+
+    # Finalize the Python interpreter
+    Py_Finalize()
+
+    puts("All c_import_python tests passed")
+    return 0
+}

@@ -1,0 +1,26 @@
+Flow Compiler
+
+Copyright (c) 2026 Abhishek Shivakumar. All rights reserved.
+
+This software, including its source code, documentation, and all associated
+files (the "Software"), is proprietary and confidential. The Software is the
+exclusive property of Abhishek Shivakumar ("the Owner").
+
+The source is published for visibility and for continuous integration only. No
+license or right, express or implied, is granted to any person or entity to
+use, copy, modify, merge, publish, distribute, sublicense, sell, or create
+derivative works of the Software, in whole or in part, without the prior
+written permission of the Owner.
+
+Unauthorized copying, distribution, modification, public display, or public
+performance of the Software, by any means, is strictly prohibited and may
+violate applicable law.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+OWNER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+For licensing inquiries, contact: abhishek.shivakumar@gmail.com

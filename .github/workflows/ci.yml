@@ -1,0 +1,48 @@
+# ACTIONS-INTENDED: flow-compiler is a public repo; the free GitHub-hosted
+# runner keeps the bootstrap build and language-corpus run off local machines.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  bootstrap-and-corpus:
+    name: Build bootstrap and run language corpus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the Stage-A bootstrap compiler from checked-in C
+        run: |
+          mkdir -p compiler/build
+          cc -O2 -o compiler/build/flowc_bootstrap compiler/bootstrap/flowc_stage_a.c
+          test -x compiler/build/flowc_bootstrap
+
+      - name: Run the language corpus through the self-hosted compiler
+        run: |
+          BOOT=compiler/build/flowc_bootstrap
+          # Minimum number of tests/lang files that must compile and run.
+          # Raise this as the self-hosted compiler closes the known gaps
+          # (closures, effects, generics, time blocks). Never lower it.
+          BASELINE=104
+          pass=0
+          fail=0
+          fails=""
+          for f in $(find tests/lang -name '*.flow' | sort); do
+            if FLOWC_BUNDLE=1 FLOWC_DIR=. FLOWC_IN="$f" FLOWC_OUT=/tmp/out.c "$BOOT" >/dev/null 2>&1 \
+               && cc -O0 -o /tmp/out /tmp/out.c -Itests/lang >/dev/null 2>&1; then
+              pass=$((pass + 1))
+            else
+              fail=$((fail + 1))
+              fails="$fails $(basename "$f")"
+            fi
+          done
+          echo "corpus: pass=$pass fail=$fail (baseline $BASELINE)"
+          [ -n "$fails" ] && echo "not yet self-hosting:$fails"
+          if [ "$pass" -lt "$BASELINE" ]; then
+            echo "::error::corpus regressed: $pass passing, baseline is $BASELINE"
+            exit 1
+          fi

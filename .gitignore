@@ -1,0 +1,15 @@
+# Build artifacts
+compiler/build/
+*.o
+*.out
+a.out
+
+# Emitted C and binaries
+/tmp/
+*.tmp
+
+# Editor and OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

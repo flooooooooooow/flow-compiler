@@ -1,0 +1,136 @@
+# @module flowc.mlir.backends.spirv
+# @means  SPIR-V lowering for @gpu compute kernels.
+#         Port of src/flow/mlir_gpu_codegen.py (the gpu.module emitter,
+#         MLIRGpuGenerator.generate_gpu_module / generate_gpu_func) and
+#         src/flow/mlir_spirv.py (MLIRSPIRVCompiler: the mlir-opt SPIR-V
+#         pipeline plus mlir-translate serialization).
+#
+# Two stages. First the Flow AST for each @gpu function becomes a textual
+# gpu.module in MLIR. Then that module is lowered to the spirv dialect by
+# mlir-opt and serialized to a SPIR-V binary by mlir-translate. The lowering
+# and serialization drive external LLVM/MLIR tools, so that stage stays a host
+# concern; the shapes below fix the Flow-side contract around it.
+#
+# Emit-only today, matching the Python module. Vulkan/MoltenVK dispatch is a
+# follow-up.
+#
+# Skeleton only. Struct and signature shapes are settled; bodies are stubs
+# marked TODO(port).
+
+import ...ast { AstArena, AST_NONE, AST_FN }
+
+extern {
+    function malloc(size: i64) -> ptr<u8>
+    function free(p: ptr<u8>) -> void
+    function strlen(s: string) -> i64
+}
+
+# --- Text writer ------------------------------------------------
+# Same append-into-a-fixed-buffer writer the other native emitters use. len is
+# the count written so far; err latches once the buffer would overflow.
+
+struct SpirvBuf {
+    out: ptr<u8>,
+    cap: i32,
+    len: i32,
+    indent: i32,
+    err: i32
+}
+
+# --- Client API -------------------------------------------------
+# The SPIR-V target environment. The Python pipeline attaches a Vulkan target
+# with the Shader capability; keep the tag so a Metal/OpenCL variant can be
+# added without changing the entry point.
+
+export const SPIRV_CLIENT_VULKAN: i32 = 0
+
+# --- Toolchain --------------------------------------------------
+# Resolved paths to the external MLIR tools. _find_tool in mlir_spirv.py walks
+# MLIR_OPT / MLIR_TRANSLATE, LLVM_PATH, PATH, then `brew --prefix llvm`. That
+# search is a host concern; this record carries the result.
+
+struct SpirvToolchain {
+    mlir_opt: ptr<u8>,
+    mlir_translate: ptr<u8>
+}
+
+# --- gpu.module emission ----------------------------------------
+
+# Emit a textual gpu.module holding one gpu.func per @gpu function in the
+# arena. Mirror of MLIRGpuGenerator.generate_gpu_module.
+# Returns the number of bytes written, or a negative value on error.
+export function flowc_spirv_gpu_module_emit(
+    arena: AstArena,
+    src: ptr<u8>,
+    out: ptr<u8>,
+    cap: i32
+) -> i32 {
+    # TODO(port): iterate AST_FN nodes carrying the gpu attribute and emit a
+    # gpu.func each, then wrap them in one gpu.module. See generate_gpu_func
+    # and generate_gpu_module in src/flow/mlir_gpu_codegen.py.
+    return 0
+}
+
+# The mlir-opt pass pipeline that lowers a gpu.module to the spirv dialect.
+# Kept aligned with the native flowc driver and MLIRSPIRVCompiler.
+# Writes the pipeline string into out and returns its byte length.
+export function flowc_spirv_pass_pipeline(out: ptr<u8>, cap: i32) -> i32 {
+    # TODO(port): emit
+    # builtin.module(spirv-attach-target{client_api=Vulkan caps=Shader},
+    # convert-math-to-spirv,convert-gpu-to-spirv,
+    # spirv.module(spirv-lower-abi-attrs),reconcile-unrealized-casts)
+    # from src/flow/mlir_spirv.py compile_mlir_to_spirv.
+    return 0
+}
+
+# --- Module slicing ---------------------------------------------
+# The Python generator emits host wrappers next to the GPU kernels. SPIR-V
+# conversion runs on the GPU module alone, so both stages slice a single named
+# module out of a larger MLIR text by brace depth.
+
+# Keep the gpu.module and discard host wrappers, wrapped in a fresh module.
+# Mirror of MLIRSPIRVCompiler._gpu_module_only.
+export function flowc_spirv_gpu_module_only(
+    mlir: ptr<u8>,
+    mlir_len: i32,
+    out: ptr<u8>,
+    cap: i32
+) -> i32 {
+    # TODO(port): find the line starting with "gpu.module", track brace depth
+    # to its matching close, and re-wrap in "module { ... }".
+    return 0
+}
+
+# Extract the converted spirv.module and normalize its storage classes.
+# Mirror of MLIRSPIRVCompiler._spirv_module_only.
+export function flowc_spirv_module_only(
+    mlir: ptr<u8>,
+    mlir_len: i32,
+    out: ptr<u8>,
+    cap: i32
+) -> i32 {
+    # TODO(port): slice the "spirv.module" block by brace depth, rewrite the
+    # Workgroup storage class on the module target and on spirv.Load/Store to
+    # StorageBuffer, and fix the vce/requires attribute. See the replacements
+    # in src/flow/mlir_spirv.py._spirv_module_only.
+    return 0
+}
+
+# --- Drive the toolchain ----------------------------------------
+
+# Lower gpu MLIR to a SPIR-V binary at output_path.
+# Runs mlir-opt with the SPIR-V pipeline, slices out the spirv.module, then
+# serializes with mlir-translate --serialize-spirv. Returns 0 on success.
+# This is the host-facing stage; the tool invocations live in the host.
+export function flowc_spirv_compile(
+    mlir: ptr<u8>,
+    mlir_len: i32,
+    tools: SpirvToolchain,
+    output_path: string
+) -> i32 {
+    # TODO(port): normalize pointer-backed memrefs to storage space 3, run
+    # mlir-opt with flowc_spirv_pass_pipeline, apply flowc_spirv_module_only,
+    # then mlir-translate --no-implicit-module --serialize-spirv and write the
+    # bytes. See MLIRSPIRVCompiler.compile_mlir_to_spirv.
+    return 0
+}
