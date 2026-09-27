@@ -37,8 +37,18 @@ Integer function calls lower to `func.call` when the callee is a defined,
 non-generic i32 function (all i32 parameters, i32 return), so integer helpers
 compose across the module.
 
-Still to do: multi-statement floats, float and mixed calls, and control flow
-(`scf`/`cf`), then the canonicalize, optimizer, backend, and JIT phases below.
+Control flow lowers through memory. When an integer function contains `if`,
+`while`, or `for`, each parameter and local becomes a `memref<i32>` stack slot;
+reads are `memref.load`, writes are `memref.store`, and the control flow is
+`scf.if` and `scf.while` with no loop-carried SSA values because the mutable
+state lives in memory. `for` lowers to a `scf.while` over an induction slot with
+the bound evaluated once. Nested control flow works. The one restriction is no
+early return: `return` is allowed only as the final statement. `mlir-opt`
+verifies the output, and its `mem2reg`/`sccp` passes can raise the slots back to
+SSA when wanted.
+
+Still to do: multi-statement floats, float and mixed calls, early return, then
+the canonicalize, optimizer, backend, and JIT phases below.
 
 ## Source-to-target map
 

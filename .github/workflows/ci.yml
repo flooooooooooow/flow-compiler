@@ -59,6 +59,15 @@ jobs:
           function lt(x: i32) -> bool {
               return x < 10
           }
+          function sum(n: i32) -> i32 {
+              let mut s: i32 = 0
+              let mut i: i32 = 0
+              while i < n {
+                  s = s + i
+                  i = i + 1
+              }
+              return s
+          }
           FLOW
           FLOWC_BACKEND=mlir FLOWC_TYPECHECK=0 FLOWC_IN=/tmp/mlir_smoke.flow \
             FLOWC_OUT=/tmp/smoke.mlir "$BOOT"
@@ -67,3 +76,5 @@ jobs:
           grep -q "func.func @add" /tmp/smoke.mlir || { echo "::error::missing func.func @add"; exit 1; }
           grep -q "arith.addi" /tmp/smoke.mlir || { echo "::error::missing arith.addi"; exit 1; }
           grep -q "arith.cmpi slt" /tmp/smoke.mlir || { echo "::error::missing arith.cmpi"; exit 1; }
+          grep -q "scf.while" /tmp/smoke.mlir || { echo "::error::missing scf.while"; exit 1; }
+          grep -q "memref.alloca" /tmp/smoke.mlir || { echo "::error::missing memref.alloca"; exit 1; }

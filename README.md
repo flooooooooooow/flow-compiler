@@ -17,11 +17,13 @@ repository stays as the reference until each layer is ported and verified here.
   `test_geometry_diagram`, is platform-dependent). The rest are the known gaps
   (closures, effects, generics, time blocks) tracked for the port.
 - MLIR lowering layer: in Flow and growing. `compiler/src/mlir_gen.flow` emits
-  the `func` and `arith` dialects under `FLOWC_BACKEND=mlir`, faithfully for
-  straight-line integer and bool functions (parameters, local bindings,
-  assignments, arithmetic, comparisons, unary minus) and as a valid typed stub
-  otherwise. `mlir-opt` verifies the output. Floats, calls, and control flow are
-  next. The full plan is in [`docs/MLIR_PORT.md`](docs/MLIR_PORT.md).
+  the `func`, `arith`, `scf`, and `memref` dialects under `FLOWC_BACKEND=mlir`.
+  Faithful coverage: integer arithmetic and comparisons, local bindings and
+  assignments, unary minus, integer function calls (`func.call`), pure-float
+  functions (`arith.addf`/etc), and control flow (`if`/`while`/`for` via memref
+  slots and `scf`). Anything outside the covered subset emits a valid typed
+  stub. `mlir-opt` verifies the output. The full plan is in
+  [`docs/MLIR_PORT.md`](docs/MLIR_PORT.md).
 
 ## Build
 
