@@ -21,6 +21,7 @@ import .fileio { flowc_read_file, flowc_write_file }
 import .pipeline_fusion { flowc_fuse_pipelines }
 import .cgen { flowc_cgen_emit }
 import .jsgen { flowc_jsgen_emit }
+import .mlir_gen { flowc_mlir_gen_emit }
 import .fmt { flowc_fmt_emit }
 import .wasm_gen { flowc_wasm_gen_compile }
 import .bpf_gen { flowc_bpf_gen_compile }
@@ -223,6 +224,16 @@ function flowc_emit_mode() -> i32 {
             }
         }
 
+        if flowc_env_eq("FLOWC_BACKEND", "mlir") == 1 {
+            nout = flowc_mlir_gen_emit(p.arena, root, src, out, out_cap)
+            if nout <= 0 {
+                puts("flowc emit: mlir_gen failed")
+                free(out)
+                flowc_parser_free(p)
+                free(src)
+                return 1
+            }
+        } else {
         if flowc_env_eq("FLOWC_BACKEND", "js") == 1 {
             nout = flowc_jsgen_emit(p.arena, root, src, out, out_cap)
             if nout <= 0 {
@@ -252,6 +263,7 @@ function flowc_emit_mode() -> i32 {
                     return 1
                 }
             }
+        }
         }
         flowc_parser_free(p)
         free(src)

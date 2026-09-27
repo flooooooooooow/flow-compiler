@@ -16,9 +16,11 @@ repository stays as the reference until each layer is ported and verified here.
   self-hosted compiler on the Linux CI runner (104 on macOS; the one difference,
   `test_geometry_diagram`, is platform-dependent). The rest are the known gaps
   (closures, effects, generics, time blocks) tracked for the port.
-- MLIR lowering layer: being ported from the Python host to Flow. The plan and
-  the module skeletons are in [`docs/MLIR_PORT.md`](docs/MLIR_PORT.md) and
-  `compiler/src/mlir/`.
+- MLIR lowering layer: the first slice is in Flow. `compiler/src/mlir_gen.flow`
+  emits the `func` and `arith` dialects under `FLOWC_BACKEND=mlir`, faithfully
+  for integer and bool functions and as a valid typed stub otherwise. `mlir-opt`
+  verifies the output. Local bindings, calls, control flow, and floats are next.
+  The full plan is in [`docs/MLIR_PORT.md`](docs/MLIR_PORT.md).
 
 ## Build
 
@@ -56,7 +58,7 @@ done
 | Path | Contents |
 |------|----------|
 | `compiler/src/` | The compiler, in Flow: lexer, parser, type checker, C backend |
-| `compiler/src/mlir/` | The MLIR lowering layer, being ported to Flow |
+| `compiler/src/mlir_gen.flow` | The MLIR lowering backend (func/arith), in Flow |
 | `compiler/bootstrap/` | The seed C (`flowc_stage_a.c`) and its built binary |
 | `compiler/scripts/` | Bootstrap regeneration and self-host verification |
 | `compiler/host/` | The C driver that hosts the Stage-A compiler |

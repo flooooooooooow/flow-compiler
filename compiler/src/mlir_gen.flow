@@ -1,0 +1,509 @@
+# @module flowc.mlir_gen
+# @means  Stage-A MLIR emitter: lower a Flow AST subset to the func/arith
+#         dialects. This is the self-hosted start of the MLIR lowering layer
+#         that the Python host still carries in full. See docs/MLIR_PORT.md.
+#
+# Coverage in this slice: one func.func per Flow function, with typed block
+# arguments and a typed return. A function whose body is a single return of a
+# supported expression (integer and bool literals, parameters, integer
+# arithmetic, and integer comparisons) is lowered faithfully. Every other
+# function is emitted as a typed stub that returns a zero constant, so the
+# output is always MLIR the tools accept. Calls, control flow, floats, and
+# local bindings are the next phases in docs/MLIR_PORT.md.
+
+import .token {
+    TOK_EQEQ, TOK_NE, TOK_LT, TOK_GT, TOK_LE, TOK_GE,
+    TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT
+}
+import .ast {
+    AstArena, AST_NONE,
+    AST_PROGRAM, AST_FN, AST_PARAM, AST_TYPE, AST_BLOCK, AST_RETURN,
+    AST_BINOP, AST_IDENT, AST_INT, AST_BOOL, AST_EXPORT
+}
+
+extern {
+    function strlen(s: string) -> i64
+}
+
+# Fixed-buffer writer for MLIR text. nval is the next SSA temporary number.
+export struct MlirBuf {
+    out: ptr<u8>,
+    cap: i32,
+    len: i32,
+    err: i32,
+    nval: i32
+}
+
+function flowc_mlir_buf_init(out: ptr<u8>, cap: i32) -> MlirBuf {
+    return MlirBuf { out: out, cap: cap, len: 0, err: 0, nval: 0 }
+}
+
+function flowc_mlir_putc(w: ptr<MlirBuf>, c: i32) {
+    if w[0].err != 0 {
+        return
+    }
+    if w[0].len >= w[0].cap {
+        w[0].err = 1
+        return
+    }
+    w[0].out[w[0].len] = c
+    w[0].len = w[0].len + 1
+}
+
+function flowc_mlir_puts(w: ptr<MlirBuf>, s: string) {
+    let p: ptr<u8> = s
+    let n: i32 = strlen(s) as i32
+    let mut i: i32 = 0
+    while i < n {
+        flowc_mlir_putc(w, p[i])
+        i = i + 1
+    }
+}
+
+function flowc_mlir_put_i32(w: ptr<MlirBuf>, val: i32) {
+    let mut v: i32 = val
+    if v < 0 {
+        flowc_mlir_putc(w, 45)
+        v = 0 - v
+    }
+    if v == 0 {
+        flowc_mlir_putc(w, 48)
+        return
+    }
+    let mut digits: array<u8, 16> = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    let mut n: i32 = 0
+    while v > 0 {
+        digits[n] = (v % 10) + 48
+        v = v / 10
+        n = n + 1
+    }
+    let mut i: i32 = n
+    while i > 0 {
+        i = i - 1
+        flowc_mlir_putc(w, digits[i])
+    }
+}
+
+function flowc_mlir_put_span(w: ptr<MlirBuf>, src: ptr<u8>, start: i32, end: i32) {
+    let mut i: i32 = start
+    while i < end {
+        flowc_mlir_putc(w, src[i])
+        i = i + 1
+    }
+}
+
+# Emit a value reference. code >= 0 is a temporary %vN. code <= -2 is a block
+# argument %arg(-code-2). code == -1 is the unsupported marker.
+function flowc_mlir_put_ref(w: ptr<MlirBuf>, code: i32) {
+    if code >= 0 {
+        flowc_mlir_puts(w, "%v")
+        flowc_mlir_put_i32(w, code)
+        return
+    }
+    flowc_mlir_puts(w, "%arg")
+    flowc_mlir_put_i32(w, (0 - code) - 2)
+}
+
+# Compare the source span [start,end) to a null-terminated literal.
+function flowc_mlir_span_eq(src: ptr<u8>, start: i32, end: i32, lit: string) -> i32 {
+    let p: ptr<u8> = lit
+    let n: i32 = strlen(lit) as i32
+    if end - start != n {
+        return 0
+    }
+    let mut i: i32 = 0
+    while i < n {
+        if src[start + i] != p[i] {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+# Write the MLIR type for an AST_TYPE node (or i32 when absent/unknown).
+function flowc_mlir_put_type(w: ptr<MlirBuf>, arena: AstArena, src: ptr<u8>, ty: i32) {
+    if ty == AST_NONE {
+        flowc_mlir_puts(w, "i32")
+        return
+    }
+    let s: i32 = arena.nodes[ty].name_start
+    let e: i32 = arena.nodes[ty].name_end
+    if flowc_mlir_span_eq(src, s, e, "i64") == 1 {
+        flowc_mlir_puts(w, "i64")
+        return
+    }
+    if flowc_mlir_span_eq(src, s, e, "f64") == 1 {
+        flowc_mlir_puts(w, "f64")
+        return
+    }
+    if flowc_mlir_span_eq(src, s, e, "f32") == 1 {
+        flowc_mlir_puts(w, "f32")
+        return
+    }
+    if flowc_mlir_span_eq(src, s, e, "bool") == 1 {
+        flowc_mlir_puts(w, "i1")
+        return
+    }
+    flowc_mlir_puts(w, "i32")
+}
+
+# 1 when the return type is void (no `-> T`), else 0.
+function flowc_mlir_ret_is_void(ty: i32) -> i32 {
+    if ty == AST_NONE {
+        return 1
+    }
+    return 0
+}
+
+# Resolve an identifier span to a parameter index, or -1 if not a parameter.
+function flowc_mlir_param_index(arena: AstArena, src: ptr<u8>, fn_id: i32, ns: i32, ne: i32) -> i32 {
+    let mut p: i32 = arena.nodes[fn_id].a
+    let mut idx: i32 = 0
+    while p != AST_NONE {
+        let ps: i32 = arena.nodes[p].name_start
+        let pe: i32 = arena.nodes[p].name_end
+        if pe - ps == ne - ns {
+            let mut k: i32 = 0
+            let mut same: i32 = 1
+            while k < ne - ns {
+                if src[ps + k] != src[ns + k] {
+                    same = 0
+                    k = ne - ns
+                } else {
+                    k = k + 1
+                }
+            }
+            if same == 1 {
+                return idx
+            }
+        }
+        idx = idx + 1
+        p = arena.nodes[p].next
+    }
+    return 0 - 1
+}
+
+# 1 when a comparison operator, else 0.
+function flowc_mlir_is_cmp(op: i32) -> i32 {
+    if op == TOK_EQEQ or op == TOK_NE or op == TOK_LT or op == TOK_GT or op == TOK_LE or op == TOK_GE {
+        return 1
+    }
+    return 0
+}
+
+# 1 when the expression is in the supported integer subset, else 0.
+function flowc_mlir_expr_supported(arena: AstArena, src: ptr<u8>, id: i32, fn_id: i32) -> i32 {
+    if id == AST_NONE {
+        return 0
+    }
+    let kind: i32 = arena.nodes[id].kind
+    if kind == AST_INT {
+        return 1
+    }
+    if kind == AST_BOOL {
+        return 1
+    }
+    if kind == AST_IDENT {
+        if flowc_mlir_param_index(arena, src, fn_id, arena.nodes[id].name_start, arena.nodes[id].name_end) >= 0 {
+            return 1
+        }
+        return 0
+    }
+    if kind == AST_BINOP {
+        let op: i32 = arena.nodes[id].ival
+        let arith: i32 = 0
+        if op == TOK_PLUS or op == TOK_MINUS or op == TOK_STAR or op == TOK_SLASH or op == TOK_PERCENT {
+            if flowc_mlir_expr_supported(arena, src, arena.nodes[id].a, fn_id) == 1 {
+                return flowc_mlir_expr_supported(arena, src, arena.nodes[id].b, fn_id)
+            }
+            return 0
+        }
+        if flowc_mlir_is_cmp(op) == 1 {
+            if flowc_mlir_expr_supported(arena, src, arena.nodes[id].a, fn_id) == 1 {
+                return flowc_mlir_expr_supported(arena, src, arena.nodes[id].b, fn_id)
+            }
+            return 0
+        }
+        return 0
+    }
+    return 0
+}
+
+# Write the arith opcode for an integer binary operator.
+function flowc_mlir_put_int_op(w: ptr<MlirBuf>, op: i32) {
+    if op == TOK_PLUS {
+        flowc_mlir_puts(w, "arith.addi")
+        return
+    }
+    if op == TOK_MINUS {
+        flowc_mlir_puts(w, "arith.subi")
+        return
+    }
+    if op == TOK_STAR {
+        flowc_mlir_puts(w, "arith.muli")
+        return
+    }
+    if op == TOK_SLASH {
+        flowc_mlir_puts(w, "arith.divsi")
+        return
+    }
+    flowc_mlir_puts(w, "arith.remsi")
+}
+
+# Write the arith.cmpi predicate for a comparison operator.
+function flowc_mlir_put_cmp_pred(w: ptr<MlirBuf>, op: i32) {
+    if op == TOK_EQEQ {
+        flowc_mlir_puts(w, "eq")
+        return
+    }
+    if op == TOK_NE {
+        flowc_mlir_puts(w, "ne")
+        return
+    }
+    if op == TOK_LT {
+        flowc_mlir_puts(w, "slt")
+        return
+    }
+    if op == TOK_GT {
+        flowc_mlir_puts(w, "sgt")
+        return
+    }
+    if op == TOK_LE {
+        flowc_mlir_puts(w, "sle")
+        return
+    }
+    flowc_mlir_puts(w, "sge")
+}
+
+# Emit an expression and return its value reference code (see put_ref).
+function flowc_mlir_emit_expr(w: ptr<MlirBuf>, arena: AstArena, src: ptr<u8>, id: i32, fn_id: i32) -> i32 {
+    if id == AST_NONE or w[0].err != 0 {
+        return 0 - 1
+    }
+    let kind: i32 = arena.nodes[id].kind
+    if kind == AST_INT {
+        let n: i32 = w[0].nval
+        w[0].nval = n + 1
+        flowc_mlir_puts(w, "    %v")
+        flowc_mlir_put_i32(w, n)
+        flowc_mlir_puts(w, " = arith.constant ")
+        flowc_mlir_put_i32(w, arena.nodes[id].ival)
+        flowc_mlir_puts(w, " : i32\n")
+        return n
+    }
+    if kind == AST_BOOL {
+        let n: i32 = w[0].nval
+        w[0].nval = n + 1
+        flowc_mlir_puts(w, "    %v")
+        flowc_mlir_put_i32(w, n)
+        flowc_mlir_puts(w, " = arith.constant ")
+        flowc_mlir_put_i32(w, arena.nodes[id].ival)
+        flowc_mlir_puts(w, " : i1\n")
+        return n
+    }
+    if kind == AST_IDENT {
+        let pidx: i32 = flowc_mlir_param_index(arena, src, fn_id, arena.nodes[id].name_start, arena.nodes[id].name_end)
+        if pidx >= 0 {
+            return (0 - pidx) - 2
+        }
+        return 0 - 1
+    }
+    if kind == AST_BINOP {
+        let op: i32 = arena.nodes[id].ival
+        let l: i32 = flowc_mlir_emit_expr(w, arena, src, arena.nodes[id].a, fn_id)
+        let r: i32 = flowc_mlir_emit_expr(w, arena, src, arena.nodes[id].b, fn_id)
+        if l == 0 - 1 or r == 0 - 1 {
+            return 0 - 1
+        }
+        let n: i32 = w[0].nval
+        w[0].nval = n + 1
+        flowc_mlir_puts(w, "    %v")
+        flowc_mlir_put_i32(w, n)
+        flowc_mlir_puts(w, " = ")
+        if flowc_mlir_is_cmp(op) == 1 {
+            flowc_mlir_puts(w, "arith.cmpi ")
+            flowc_mlir_put_cmp_pred(w, op)
+            flowc_mlir_puts(w, ", ")
+            flowc_mlir_put_ref(w, l)
+            flowc_mlir_puts(w, ", ")
+            flowc_mlir_put_ref(w, r)
+            flowc_mlir_puts(w, " : i32\n")
+            return n
+        }
+        flowc_mlir_put_int_op(w, op)
+        flowc_mlir_puts(w, " ")
+        flowc_mlir_put_ref(w, l)
+        flowc_mlir_puts(w, ", ")
+        flowc_mlir_put_ref(w, r)
+        flowc_mlir_puts(w, " : i32\n")
+        return n
+    }
+    return 0 - 1
+}
+
+# Emit a typed zero constant and return its temporary number.
+function flowc_mlir_emit_zero(w: ptr<MlirBuf>, arena: AstArena, src: ptr<u8>, ty: i32) -> i32 {
+    let n: i32 = w[0].nval
+    w[0].nval = n + 1
+    flowc_mlir_puts(w, "    %v")
+    flowc_mlir_put_i32(w, n)
+    flowc_mlir_puts(w, " = arith.constant ")
+    let is_f: i32 = 0
+    if ty != AST_NONE {
+        let s: i32 = arena.nodes[ty].name_start
+        let e: i32 = arena.nodes[ty].name_end
+        if flowc_mlir_span_eq(src, s, e, "f64") == 1 {
+            is_f = 1
+        }
+        if flowc_mlir_span_eq(src, s, e, "f32") == 1 {
+            is_f = 1
+        }
+    }
+    if is_f == 1 {
+        flowc_mlir_puts(w, "0.0 : ")
+    } else {
+        flowc_mlir_puts(w, "0 : ")
+    }
+    flowc_mlir_put_type(w, arena, src, ty)
+    flowc_mlir_puts(w, "\n")
+    return n
+}
+
+# 1 when the body is exactly one return of a supported expression.
+function flowc_mlir_body_is_simple_return(arena: AstArena, src: ptr<u8>, body: i32, fn_id: i32) -> i32 {
+    if body == AST_NONE {
+        return 0
+    }
+    let first: i32 = arena.nodes[body].a
+    if first == AST_NONE {
+        return 0
+    }
+    if arena.nodes[first].next != AST_NONE {
+        return 0
+    }
+    if arena.nodes[first].kind != AST_RETURN {
+        return 0
+    }
+    let expr: i32 = arena.nodes[first].a
+    if expr == AST_NONE {
+        return 0
+    }
+    let rty: i32 = arena.nodes[fn_id].b
+    # Faithful lowering only when the declared return is i32 or bool.
+    if rty != AST_NONE {
+        let s: i32 = arena.nodes[rty].name_start
+        let e: i32 = arena.nodes[rty].name_end
+        if flowc_mlir_span_eq(src, s, e, "i32") == 0 and flowc_mlir_span_eq(src, s, e, "bool") == 0 {
+            return 0
+        }
+    } else {
+        return 0
+    }
+    return flowc_mlir_expr_supported(arena, src, expr, fn_id)
+}
+
+function flowc_mlir_emit_fn(w: ptr<MlirBuf>, arena: AstArena, src: ptr<u8>, fn_id: i32) {
+    # Skip forward declarations and generic functions in this slice.
+    if arena.nodes[fn_id].c == AST_NONE {
+        return
+    }
+    if arena.nodes[fn_id].ival != 0 {
+        return
+    }
+    w[0].nval = 0
+
+    flowc_mlir_puts(w, "  func.func @")
+    flowc_mlir_put_span(w, src, arena.nodes[fn_id].name_start, arena.nodes[fn_id].name_end)
+    flowc_mlir_putc(w, 40)
+    let mut param: i32 = arena.nodes[fn_id].a
+    let mut idx: i32 = 0
+    while param != AST_NONE {
+        if idx != 0 {
+            flowc_mlir_puts(w, ", ")
+        }
+        flowc_mlir_puts(w, "%arg")
+        flowc_mlir_put_i32(w, idx)
+        flowc_mlir_puts(w, ": ")
+        flowc_mlir_put_type(w, arena, src, arena.nodes[param].a)
+        idx = idx + 1
+        param = arena.nodes[param].next
+    }
+    flowc_mlir_putc(w, 41)
+
+    let rty: i32 = arena.nodes[fn_id].b
+    if flowc_mlir_ret_is_void(rty) == 0 {
+        flowc_mlir_puts(w, " -> ")
+        flowc_mlir_put_type(w, arena, src, rty)
+    }
+    flowc_mlir_puts(w, " {\n")
+
+    let body: i32 = arena.nodes[fn_id].c
+    if flowc_mlir_ret_is_void(rty) == 1 {
+        flowc_mlir_puts(w, "    return\n")
+    } else {
+        if flowc_mlir_body_is_simple_return(arena, src, body, fn_id) == 1 {
+            let expr: i32 = arena.nodes[arena.nodes[body].a].a
+            let code: i32 = flowc_mlir_emit_expr(w, arena, src, expr, fn_id)
+            flowc_mlir_puts(w, "    return ")
+            flowc_mlir_put_ref(w, code)
+            flowc_mlir_puts(w, " : ")
+            flowc_mlir_put_type(w, arena, src, rty)
+            flowc_mlir_puts(w, "\n")
+        } else {
+            # Valid typed stub for constructs beyond this slice.
+            let z: i32 = flowc_mlir_emit_zero(w, arena, src, rty)
+            flowc_mlir_puts(w, "    return %v")
+            flowc_mlir_put_i32(w, z)
+            flowc_mlir_puts(w, " : ")
+            flowc_mlir_put_type(w, arena, src, rty)
+            flowc_mlir_puts(w, "\n")
+        }
+    }
+    flowc_mlir_puts(w, "  }\n")
+}
+
+function flowc_mlir_unwrap_fn(arena: AstArena, item: i32) -> i32 {
+    if item == AST_NONE {
+        return AST_NONE
+    }
+    if arena.nodes[item].kind == AST_FN {
+        return item
+    }
+    if arena.nodes[item].kind == AST_EXPORT {
+        let inner: i32 = arena.nodes[item].a
+        if inner != AST_NONE and arena.nodes[inner].kind == AST_FN {
+            return inner
+        }
+    }
+    return AST_NONE
+}
+
+# Emit an MLIR module for a program AST into `out` (capacity `out_cap`).
+# Returns bytes written, or -1 on overflow or bad root.
+export function flowc_mlir_gen_emit(arena: AstArena, root: i32, src: ptr<u8>, out: ptr<u8>, out_cap: i32) -> i32 {
+    if root == AST_NONE or root < 0 {
+        return 0 - 1
+    }
+    if arena.nodes[root].kind != AST_PROGRAM {
+        return 0 - 1
+    }
+    let mut w: MlirBuf = flowc_mlir_buf_init(out, out_cap)
+    flowc_mlir_puts(&w, "// Generated by flowc Stage-A MLIR backend\n")
+    flowc_mlir_puts(&w, "module {\n")
+
+    let mut item: i32 = arena.nodes[root].a
+    while item != AST_NONE {
+        let fn: i32 = flowc_mlir_unwrap_fn(arena, item)
+        if fn != AST_NONE {
+            flowc_mlir_emit_fn(&w, arena, src, fn)
+        }
+        item = arena.nodes[item].next
+    }
+
+    flowc_mlir_puts(&w, "}\n")
+    if w.err != 0 {
+        return 0 - 1
+    }
+    return w.len
+}

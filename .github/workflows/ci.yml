@@ -48,3 +48,22 @@ jobs:
             echo "::error::corpus regressed: $pass passing, baseline is $BASELINE"
             exit 1
           fi
+
+      - name: MLIR backend smoke
+        run: |
+          BOOT=compiler/build/flowc_bootstrap
+          cat > /tmp/mlir_smoke.flow <<'FLOW'
+          function add(a: i32, b: i32) -> i32 {
+              return a + b
+          }
+          function lt(x: i32) -> bool {
+              return x < 10
+          }
+          FLOW
+          FLOWC_BACKEND=mlir FLOWC_TYPECHECK=0 FLOWC_IN=/tmp/mlir_smoke.flow \
+            FLOWC_OUT=/tmp/smoke.mlir "$BOOT"
+          echo "--- emitted MLIR ---"
+          cat /tmp/smoke.mlir
+          grep -q "func.func @add" /tmp/smoke.mlir || { echo "::error::missing func.func @add"; exit 1; }
+          grep -q "arith.addi" /tmp/smoke.mlir || { echo "::error::missing arith.addi"; exit 1; }
+          grep -q "arith.cmpi slt" /tmp/smoke.mlir || { echo "::error::missing arith.cmpi"; exit 1; }

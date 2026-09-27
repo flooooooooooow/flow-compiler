@@ -7,10 +7,27 @@ module, a rough size, and a checkbox, and it groups the work into phases that
 can land one at a time.
 
 The port follows the style already set in `compiler/src/`: index-based arenas,
-integer tag constants, explicit types, `ptr<T>` for low-level work. The MLIR
-type strings the Python emitter carries inline become tagged records in an
-arena, rendered to text at the end. See the skeletons under
-`compiler/src/mlir/` for the settled struct and signature shapes.
+integer tag constants, explicit types, `ptr<T>` for low-level work. It lands as
+a flat backend module, `compiler/src/mlir_gen.flow`, the same shape as
+`jsgen.flow` and `cgen.flow`: a fixed-buffer writer and an AST-arena walk that
+emits text directly. That is the pattern the self-hosted compiler already
+proves it can compile, so the port builds on it rather than on a new
+subdirectory layout.
+
+## Status
+
+The first slice is landed. `compiler/src/mlir_gen.flow` is wired into
+`main.flow` under `FLOWC_BACKEND=mlir` and ships in the checked-in bootstrap
+(fixed point verified). It emits one `func.func` per Flow function with typed
+block arguments and a typed return. A function whose body is a single return of
+a supported expression (integer and bool literals, parameters, integer
+arithmetic, integer comparisons) lowers faithfully to the `func` and `arith`
+dialects. Every other function emits a valid typed zero-return stub, so the
+whole module is always MLIR the tools accept. `mlir-opt` parses, verifies, and
+canonicalizes the output.
+
+Still to do: local bindings, calls, control flow (`scf`/`cf`), and floats, then
+the canonicalize, optimizer, backend, and JIT phases below.
 
 ## Source-to-target map
 
